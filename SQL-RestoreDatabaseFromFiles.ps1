@@ -83,7 +83,6 @@ function RestoreFullBackupWithMove ( [string] $Database, [string] $BackupFile ) 
 
         
     #region Database backup
-
     # if wanna a DB prefix to restore as a "new" database, update the global variable
     $Database= $global:RestoreDBprefix + $Database
 

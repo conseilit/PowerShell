@@ -281,8 +281,7 @@ $RestoreOperations = Import-Csv $DatabasesToRestore  -Delimiter ";"
 foreach ($RestoreOperation in $RestoreOperations) {
 
     RestoreDatabase -Source $RestoreOperation.Source -destination $RestoreOperation.Destination -Database $RestoreOperation.Database
-    # add some functionality : change DB Compat Level, Drop auto created stats, alter index, ...
-    # add integrity checks
+    # add some functionality : CheckDB, change DB Compat Level, Drop auto created stats, alter index, ...
 }
 
 $LogMessage = "Ending module at $(get-date -format "dd/MM/yyyy HH:mm:ss")"

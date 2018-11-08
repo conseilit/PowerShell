@@ -15,7 +15,6 @@
 ============================================================================#>
 
 # Assuming same disk infrastructure, no Move option
-# Script based on files date/time, else use RESTORE HEADERONLY  
 
 Clear-Host
 $Instance = "SQL2017"

@@ -41,7 +41,7 @@ try {
 catch {}
 
 
-$ExcludedHostList = "dbastmartin","(local)"
+$ExcludedHostList = "devsql2016","(local)"
 
 
 
