@@ -61,8 +61,8 @@ function WindowsConfiguration ([string]$NewName)
     New-NetFirewallRule -DisplayName "SQL Server Browser UDP 1434"  -Direction Inbound  -Protocol UDP -LocalPort 1434 -Action Allow
     
     # Specific rules for AlwaysOn Availability Groups / DBM : TCP Port 5022
-    New-NetFirewallRule -DisplayName "SQL Server AG 5022 IN"  -Direction Inbound   -Protocol TCP -LocalPort 1434 -Action Allow
-    New-NetFirewallRule -DisplayName "SQL Server AG 5022 OUT" -Direction Outbound  -Protocol TCP -LocalPort 1434 -Action Allow
+    New-NetFirewallRule -DisplayName "SQL Server AG 5022 IN"  -Direction Inbound   -Protocol TCP -LocalPort 5022 -Action Allow
+    New-NetFirewallRule -DisplayName "SQL Server AG 5022 OUT" -Direction Outbound  -Protocol TCP -LocalPort 5022 -Action Allow
 
     #Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False
 
