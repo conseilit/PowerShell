@@ -128,7 +128,7 @@ ForEach ($InstanceName in $DiscoveredInstanceList) {
                                                                           Size=$Database.Size.ToString("N");`
                                                                           Owner=$Database.Owner;`
                                                                           Collation=$Database.collation;`
-                                                                          AutoClose=$Database.AutoClose;` 
+                                                                          AutoClose=$Database.AutoClose;`
                                                                           AutoShrink=$Database.AutoShrink;`
                                                                           IsReadCommittedSnapshotOn=$Database.IsReadCommittedSnapshotOn;`
                                                                           PageVerify=$Database.PageVerify;`
@@ -168,7 +168,7 @@ ForEach ($InstanceName in $DiscoveredInstanceList) {
                                                          Version=$Server.VersionString;`
                                                          ProductLevel=$Server.ProductLevel;`
                                                          Collation=$Server.collation;`
-                                                         Processors=$server.Processors;` 
+                                                         Processors=$server.Processors;`
                                                          PhysicalMemory=$Server.PhysicalMemory;`
                                                          MaxServerMemory=$Server.Configuration.MaxServerMemory.RunValue;`
                                                          DatabaseCount=$DatabaseCount;`
