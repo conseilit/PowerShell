@@ -20,13 +20,14 @@ Clear-Host
 
 [bool]$global:Verbose = $true
 [string]$global:BackupFolderRoot = "\\BackupShare\SQL"
-[string]$global:BackupFolderRoot = "C:\Program Files\Microsoft SQL Server\MSSQL14.SQL2017\MSSQL\Backup\X1CARBON`$SQL2017\AdventureWorks"
+#[string]$global:BackupFolderRoot = "C:\Program Files\Microsoft SQL Server\MSSQL14.SQL2017\MSSQL\Backup\X1CARBON`$SQL2017\AdventureWorks"
 [bool]$global:ShowTSQL = $false
 [bool]$global:PerformRestore = $true
 [string]$global:RestoreDBprefix = "" # specify a prefix here
 
 $Instance="X1carbon\sql2017"
 $DatabaseList = "AdventureWorks","AdventureWorks2008"
+
 
 
 #region Log
@@ -161,10 +162,12 @@ function RestoreDatabase ([string] $Database) {
 
     $BackupFileList = @()
 
+    $BackupFolder = Join-Path -path $global:BackupFolderRoot -childpath $Database
+
     Write-Log "Restore database $Database"
-    Write-log "Getting all backup files from  $BackupFolderRoot"    
+    Write-log "Getting all backup files from  $BackupFolder"    
     
-    $FileList = get-childitem "$BackupFolderRoot\*" -recurse -ErrorAction:silentlycontinue 
+    $FileList = get-childitem "$BackupFolder\*" -recurse -ErrorAction:silentlycontinue 
 
     Foreach($BackupFile in $FileList) {
         
@@ -213,11 +216,11 @@ function RestoreDatabase ([string] $Database) {
     # find the last differential backup file
     write-log "Newest differential backup found :"
     if ($global:Verbose) {
-        $BackupFileList | Where-Object BackupTypeDescription -eq "Database Differential" | Where-Object FirstLsn -GT $LastFullBackup.LastLsn `
+        $BackupFileList | Where-Object BackupTypeDescription -eq "Database Differential" | Where-Object FirstLsn -GT $($LastFullBackup.LastLsn) `
                         | Sort-Object LastLsn -Descending | Select-Object -First 1 `
                         | Select-object BackupFileName,BackupTypeDescription, FirstLsn, LastLSN, BackupStartDate, BackupFinishDate | format-table -AutoSize
     }
-    $LastDiffBackup = $BackupFileList | Where-Object BackupTypeDescription -eq "Database Differential" | Where-Object FirstLsn -GT $LastFullBackup.LastLsn `
+    $LastDiffBackup = $BackupFileList | Where-Object BackupTypeDescription -eq "Database Differential" | Where-Object FirstLsn -GT $($LastFullBackup.LastLsn) `
                                       | Sort-Object LastLsn -Descending | Select-Object -First 1
    
     if ($global:Verbose) {Write-log "Backup Differential $($LastDiffBackup.BackupFile)"}
@@ -237,12 +240,14 @@ function RestoreDatabase ([string] $Database) {
         }
         finally {
             Write-Log "$($LastDiffBackup.BackupFilename) successfully restored !"
+            $LastDiffBackupLastLsn = $($LastDiffBackup.LastLsn)
             if ($global:Verbose) {Write-log "Backup Database LastLSN $($LastDiffBackup.LastLsn)"}
         }
         Write-Log ""
     }
     else {
         Write-Log "No differential backup found"
+        $LastDiffBackupLastLsn = $($LastFullBackup.LastLsn)
     }
     #endregion 
 
@@ -252,11 +257,11 @@ function RestoreDatabase ([string] $Database) {
 	# list all trn files newer than the full / differential backup
     write-log "Subsequents transaction log backups :"
     if ($global:Verbose) {
-        $BackupFileList | Where-Object BackupTypeDescription -eq "Transaction Log" | Where-Object LastLsn -GE $LastDiffBackup.LastLsn | Sort-Object LastLsn  `
+        $BackupFileList | Where-Object BackupTypeDescription -eq "Transaction Log" | Where-Object LastLsn -GE $LastDiffBackupLastLsn | Sort-Object LastLsn  `
                         | Select-object BackupFileName,BackupTypeDescription, FirstLsn, LastLSN, BackupStartDate, BackupFinishDate | ft -AutoSize
     }
 
-    $LastTLogBackup = $BackupFileList | Where-Object BackupTypeDescription -eq "Transaction Log" | Where-Object LastLsn -GE $LastDiffBackup.LastLsn `
+    $LastTLogBackup = $BackupFileList | Where-Object BackupTypeDescription -eq "Transaction Log" | Where-Object LastLsn -GE $LastDiffBackupLastLsn `
                                       | Sort-Object LastLsn  
                     
 
