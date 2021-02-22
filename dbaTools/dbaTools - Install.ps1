@@ -1,3 +1,8 @@
+# SQL Server restore scripts based on dbaTools commands
+# Thanks to Chrissy LeMaire (@cl | https://blog.netnerds.net/ )
+#          , Row Sewell (@SQLDBAWithBeard | https://sqldbawithabeard.com/)
+#          , and all SQL Server community members
+# http://dbatools.io
 
 Set-ExecutionPolicy Unrestricted
 
