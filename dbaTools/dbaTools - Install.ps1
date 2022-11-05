@@ -26,5 +26,12 @@ $Server | Select-Object DomainInstanceName,VersionMajor,DatabaseEngineEdition
 <#
     # issue when updating dbatools : TLS support
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+
+
+[system.net.webrequest]::defaultwebproxy = new-object system.net.webproxy('http://xxxxx:8080')
+[system.net.webrequest]::defaultwebproxy.credentials = [System.Net.CredentialCache]::DefaultNetworkCredentials
+[system.net.webrequest]::defaultwebproxy.BypassProxyOnLocal = $true
+
 #>
 
