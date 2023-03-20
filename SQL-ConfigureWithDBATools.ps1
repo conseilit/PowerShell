@@ -26,73 +26,77 @@ $Server = Connect-DbaInstance -SqlInstance $InstanceName
 #$Server = Connect-DbaInstance -SqlInstance $InstanceName -SqlCredential $cred
 $Server | Select-Object DomainInstanceName,VersionMajor,DatabaseEngineEdition
 
-# set the right backup location here, otherwise the default backup directory will be used
-$defaultbackuplocation = (Get-DbaDefaultPath -SqlInstance $Server).Backup 
+#region alter default backup folder
+<#
+$Server.BackupDirectory = "\\xxxxxxxx\yyyyy"
+$Server.alter()
+$Server = Connect-DbaInstance -SqlInstance $InstanceName
+$Server  | Select-Object DomainInstanceName,VersionMajor,DatabaseEngineEdition
+#>
+#endregion
+$Server.BackupDirectory
 
 
 #region SQL Server properties configuration
 
-    Set-DbaErrorLogConfig -SqlInstance $Server -LogCount 99
-    Set-DbaSpConfigure -SqlInstance $Server -name RemoteDacConnectionsEnabled -value 1
-    Set-DbaSpConfigure -SqlInstance $Server -name OptimizeAdhocWorkloads -value 1
-    Set-DbaSpConfigure -SqlInstance $Server -name CostThresholdForParallelism -value 25
-    Set-DbaSpConfigure -SqlInstance $Server -name DefaultBackupCompression -value 1
-    Set-DbaSpConfigure -SqlInstance $Server -name BlockedProcessThreshold -value 1
-    Set-DbaSpConfigure -SqlInstance $Server -name ContainmentEnabled -value 1
+    Set-DbaErrorLogConfig -SqlInstance $Server -LogCount 99 | Out-Null
+    Set-DbaSpConfigure -SqlInstance $Server -name ShowAdvancedOptions -Value 1 | Out-Null
+    Set-DbaSpConfigure -SqlInstance $Server -name RemoteDacConnectionsEnabled -value 1 | Out-Null
+    Set-DbaSpConfigure -SqlInstance $Server -name OptimizeAdhocWorkloads -value 1 | Out-Null
+    Set-DbaSpConfigure -SqlInstance $Server -name CostThresholdForParallelism -value 25 | Out-Null
+    Set-DbaSpConfigure -SqlInstance $Server -name DefaultBackupCompression -value 1 | Out-Null
+    Set-DbaSpConfigure -SqlInstance $Server -name BlockedProcessThreshold -value 5 | Out-Null
+    Set-DbaSpConfigure -SqlInstance $Server -name ContainmentEnabled -value 1 | Out-Null
 
-    # adjust memory
+    # Adjust memory
     if ($ConfigureMemory) {
-        Set-DbaMaxMemory -SqlInstance $Server
+        Set-DbaMaxMemory -SqlInstance $Server | Out-Null
     }
     
     # Change the retention settings for system_health Extended Events session
-    Stop-DbaXESession -SqlInstance $Server -Session "system_health"
+    Stop-DbaXESession -SqlInstance $Server -Session "system_health"  | Out-Null
     Invoke-DbaQuery -SqlInstance $Server -Database "master" -Query "
         ALTER EVENT SESSION [system_health] ON SERVER
         DROP TARGET package0.event_file;
         GO
         ALTER EVENT SESSION [system_health] ON SERVER
         ADD TARGET package0.event_file
-            (SET FILENAME=N'system_health.xel',
-                max_file_size=(25),
-                max_rollover_files=(20)
+            (SET filename=N'system_health.xel',
+                max_file_size=(100),
+                max_rollover_files=(10)
             )
-    "
-    Start-DbaXESession -SqlInstance $Server -Session "system_health"
+    " | Out-Null
+    Start-DbaXESession -SqlInstance $Server -Session "system_health" | Out-Null
 
 
     # Change the retention settings for AlwaysOn_health Extended Events session
-    Stop-DbaXESession -SqlInstance $Server -Session "AlwaysOn_health"
+    Stop-DbaXESession -SqlInstance $Server -Session "AlwaysOn_health" | Out-Null
     Invoke-DbaQuery -SqlInstance $Server -Database "master" -Query "
         ALTER EVENT SESSION [AlwaysOn_health] ON SERVER
         DROP TARGET package0.event_file;
         GO
         ALTER EVENT SESSION [AlwaysOn_health] ON SERVER
         ADD TARGET package0.event_file
-            (SET FILENAME=N'AlwaysOn_health.xel',
-                max_file_size=(25),
-                max_rollover_files=(20)
+            (SET filename=N'AlwaysOn_health.xel',
+                max_file_size=(100),
+                max_rollover_files=(10)
             )
 
-    "
+    " | Out-Null
+	Start-DbaXESession -SqlInstance $Server -Session "AlwaysOn_health" | Out-Null
+	
     # Stop collecting noise events
     # https://www.sqlskills.com/blogs/erin/the-security_error_ring_buffer_recorded-event-and-why-you-dont-need-it/
     Invoke-DbaQuery -SqlInstance $Server -Database "master" -Query "
         ALTER EVENT SESSION [system_health] ON SERVER
         DROP EVENT sqlserver.security_error_ring_buffer_recorded;
-    "
-    Start-DbaXESession -SqlInstance $Server -Session "AlwaysOn_health"
+    " | Out-Null
 
     
     Invoke-DbaQuery -SqlInstance $Server -Database "master" -Query "
             CREATE EVENT SESSION [PerformanceIssues] ON SERVER 
             ADD EVENT sqlserver.blocked_process_report(
                 ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,sqlserver.query_hash,sqlserver.session_id,sqlserver.sql_text,sqlserver.username)),
-            ADD EVENT sqlserver.lock_timeout_greater_than_0(SET collect_database_name=(0)
-                ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,sqlserver.session_id,sqlserver.sql_text,sqlserver.username)),
-            ADD EVENT sqlserver.locks_lock_waits(
-                ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,sqlserver.session_id,sqlserver.sql_text,sqlserver.username)
-                WHERE ([increment]>=(1000) AND [count]<=(100))),
             ADD EVENT sqlserver.rpc_completed(SET collect_statement=(1)
                 ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,sqlserver.query_hash,sqlserver.session_id,sqlserver.sql_text,sqlserver.username)
                 WHERE ([package0].[greater_than_equal_uint64]([duration],(250000)))),
@@ -101,51 +105,64 @@ $defaultbackuplocation = (Get-DbaDefaultPath -SqlInstance $Server).Backup
                 WHERE ([package0].[greater_than_equal_uint64]([duration],(250000)))),
             ADD EVENT sqlserver.xml_deadlock_report(
                 ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,sqlserver.query_hash,sqlserver.session_id,sqlserver.sql_text,sqlserver.username))
-            ADD TARGET package0.event_file(SET filename=N'Long running Queries',max_file_size=(50),max_rollover_files=(10))
+            ADD TARGET package0.event_file(SET filename=N'PerformanceIssues',max_file_size=(100),max_rollover_files=(10))
             WITH (MAX_MEMORY=4096 KB,EVENT_RETENTION_MODE=ALLOW_SINGLE_EVENT_LOSS,MAX_DISPATCH_LATENCY=30 SECONDS,MAX_EVENT_SIZE=0 KB,MEMORY_PARTITION_MODE=NONE,TRACK_CAUSALITY=ON,STARTUP_STATE=ON)
-    "
-    Start-DbaXESession -SqlInstance $Server -Session "PerformanceIssues"
+    " | Out-Null
+    Start-DbaXESession -SqlInstance $Server -Session "PerformanceIssues"| Out-Null
 
 	# maybe remove the event from system_health
 	Invoke-DbaQuery -SqlInstance $Server -Database "master" -Query "
 		ALTER EVENT SESSION [system_health] ON SERVER
 		DROP EVENT sqlserver.xml_deadlock_report;
-	"
+	" | Out-Null
+
+    # TempDB autogrowth
+    Invoke-DbaQuery -SqlInstance $Server -Database "master" -Query "
+        CREATE EVENT SESSION [TempDBAutogrowth] ON SERVER 
+        ADD EVENT sqlserver.database_file_size_change(
+            ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,sqlserver.session_id,sqlserver.sql_text)
+            WHERE ([database_id]=(2) AND [session_id]>(50))),
+        ADD EVENT sqlserver.databases_log_file_size_changed(
+            ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,sqlserver.session_id,sqlserver.sql_text)
+            WHERE ([database_id]=(2) AND [session_id]>(50)))
+        ADD TARGET package0.event_file(SET filename=N'TempDBAutogrowth',max_file_size=(50),max_rollover_files=(10))
+        WITH (MAX_MEMORY=4096 KB,EVENT_RETENTION_MODE=ALLOW_SINGLE_EVENT_LOSS,MAX_DISPATCH_LATENCY=30 SECONDS,MAX_EVENT_SIZE=0 KB,MEMORY_PARTITION_MODE=NONE,TRACK_CAUSALITY=ON,STARTUP_STATE=ON)
+    " | Out-Null
+
+    Start-DbaXESession -SqlInstance $Server -Session "TempDBAutogrowth"| Out-Null
 
     # increase SQL Agent default retention
     if (!($(Get-DbaInstanceProperty -SqlInstance $Server -InstanceProperty  Edition).value -Match "Express")){
-        Set-DbaAgentServer -SqlInstance $Server -MaximumHistoryRows 999999 -MaximumJobHistoryRows 999999 
+        Set-DbaAgentServer -SqlInstance $Server -MaximumHistoryRows 999999 -MaximumJobHistoryRows 999999 | Out-Null
     }
+
    
 #endregion
 
 
 # Create DBA database if needed
 if (!(Get-DbaDatabase -SqlInstance $Server -Database $dbaDatabase )){
-    $dbaDB = New-DbaDatabase -SqlInstance $Server -Name $dbaDatabase
+    $dbaDB = New-DbaDatabase -SqlInstance $Server -Name $dbaDatabase -Owner sa  | Out-Null
     $dbaDB | Set-DbaDbRecoveryModel -RecoveryModel Simple -Confirm:$false | Out-Null
     Write-Host "[$dbaDatabase] database created"
 } else {
     Write-Host "[$dbaDatabase] database already exists"
 }
 
+
 # Install sp_whoisactive stored procedure. Thanks Adam Machanic 
 # Feedback: mailto:adam@dataeducation.com
 # Updates: http://whoisactive.com
 # Blog: http://dataeducation.com
 if ($InstallDbaWhoIsActive) {
-    Install-DbaWhoIsActive -SqlInstance $Server -Database $dbaDatabase
+    Install-DbaWhoIsActive -SqlInstance $Server -Database $dbaDatabase | Out-Null
 }
 
 
 #region Install Database maintenance objects
 # https://ola.hallengren.com/
 
-    if ($defaultbackuplocation -eq $((Get-DbaDefaultPath -SqlInstance $Server).Backup)){
-        Install-DbaMaintenanceSolution -SqlInstance $Server.Name -Database $dbaDatabase -CleanupTime $CleanupTime -InstallJobs -LogToTable -ReplaceExisting -Force    
-    } else {
-        Install-DbaMaintenanceSolution -SqlInstance $Server.Name -Database $dbaDatabase -BackupLocation $defaultbackuplocation -CleanupTime $CleanupTime -InstallJobs -LogToTable -ReplaceExisting -Force
-    }
+    Install-DbaMaintenanceSolution -SqlInstance $Server.Name -Database $dbaDatabase -CleanupTime $CleanupTime -InstallJobs -LogToTable -ReplaceExisting -Force | out-null
 
     $tSQL = "
         CREATE PROCEDURE dbo.sp_sp_start_job_wait
@@ -242,6 +259,11 @@ New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "Cycle Errorlo
                     -OnSuccessAction GoToNextStep `
                     -OnFailAction QuitWithFailure | Out-Null
 
+New-DbaAgentSchedule -SqlInstance $Server -Schedule $job.name -Job $job.name `
+                    -FrequencyType Daily -FrequencyInterval Everyday `
+                    -FrequencySubdayType Time -FrequencySubDayinterval 0 `
+                    -StartTime "000001" -EndTime "235959" -Force | Out-Null
+
 New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "CommandLog Cleanup" -Force `
                     -Database master -StepId 2 `
                     -Subsystem "TransactSql" `
@@ -294,15 +316,16 @@ New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseBacku
                     -OnSuccessAction QuitWithSuccess `
                     -OnFailAction QuitWithFailure | Out-Null             
                     
-New-DbaAgentSchedule -SqlInstance $Server -Schedule $job.name -Job $job.name `
-                     -FrequencyType Daily -FrequencyInterval Everyday `
-                     -FrequencySubdayType Time -FrequencySubDayinterval 0 `
-                     -StartTime "000001" -EndTime "235959" -Force | Out-Null
 
 #endregion
 
 #region Database backup
 $job = New-DbaAgentJob -SqlInstance $Server -Job '_DBA - USER_DATABASES - FULL' -Category "Database Maintenance" -OwnerLogin sa
+                        
+New-DbaAgentSchedule -SqlInstance $Server -Schedule $job.name -Job $job.name `
+                    -FrequencyType Weekly -FrequencyInterval Sunday `
+                    -FrequencySubdayType Time -FrequencySubDayinterval 0 -FrequencyRecurrenceFactor 1 `
+                    -StartTime "010000" -EndTime "235959" -Force | Out-Null
 
 New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseIntegrityCheck - USER_DATABASES" -Force `
                     -Database master -StepId 1 `
@@ -325,16 +348,16 @@ New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseBacku
                     -OnSuccessAction QuitWithSuccess `
                     -OnFailAction QuitWithFailure | Out-Null                        
 
-                        
-New-DbaAgentSchedule -SqlInstance $Server -Schedule $job.name -Job $job.name `
-                    -FrequencyType Weekly -FrequencyInterval Sunday `
-                    -FrequencySubdayType Time -FrequencySubDayinterval 0 -FrequencyRecurrenceFactor 1 `
-                    -StartTime "010000" -EndTime "235959" -Force | Out-Null
 
 #endregion
 
 #region Diff backup
 $job = New-DbaAgentJob -SqlInstance $Server -Job '_DBA - USER_DATABASES - DIFF' -Category "Database Maintenance" -OwnerLogin sa
+
+New-DbaAgentSchedule -SqlInstance $Server -Schedule $job.name -Job $job.name `
+                    -FrequencyType Weekly -FrequencyInterval Monday,Tuesday,Wednesday,Thursday,Friday,Saturday `
+                    -FrequencySubdayType Time -FrequencySubDayinterval 0 -FrequencyRecurrenceFactor 1 `
+                    -StartTime "010000" -EndTime "235959" -Force | Out-Null
 
 New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseIntegrityCheck - USER_DATABASES" -Force `
                     -Database master -StepId 1 `
@@ -356,16 +379,16 @@ New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseBacku
                     -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='DatabaseBackup - USER_DATABASES - DIFF', @WaitTime = '00:01:00'" `
                     -OnSuccessAction QuitWithSuccess `
                     -OnFailAction QuitWithFailure | Out-Null                       
-
                         
-New-DbaAgentSchedule -SqlInstance $Server -Schedule $job.name -Job $job.name `
-                    -FrequencyType Weekly -FrequencyInterval Monday,Tuesday,Wednesday,Thursday,Friday,Saturday `
-                    -FrequencySubdayType Time -FrequencySubDayinterval 0 -FrequencyRecurrenceFactor 1 `
-                    -StartTime "010000" -EndTime "235959" -Force | Out-Null
 #endregion
 
 #region Log backup
 $job = New-DbaAgentJob -SqlInstance $Server -Job '_DBA - USER_DATABASES - LOG' -Category "Database Maintenance" -OwnerLogin sa 
+
+New-DbaAgentSchedule -SqlInstance $Server -Schedule $job.name -Job $job.name `
+                     -FrequencyType Daily -FrequencyInterval EveryDay `
+                     -FrequencySubdayType Minutes -FrequencySubDayinterval 30 `
+                     -StartTime "001500" -EndTime "235959" -Force | Out-Null
 
 New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseBackup - USER_DATABASES - LOG" -Force `
                     -Database master -StepId 1 `
@@ -374,6 +397,7 @@ New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseBacku
                     -OnSuccessAction GoToNextStep `
                     -OnFailAction QuitWithFailure | Out-Null
 
+<#
 New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseBackup - SYSTEM_DATABASES - LOG" -Force `
                     -Database master -StepId 2 `
                     -Subsystem "TransactSql" `
@@ -387,12 +411,8 @@ New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseBacku
                                 @LogToTable = 'Y' " `
                     -OnSuccessAction QuitWithSuccess `
                     -OnFailAction QuitWithFailure | Out-Null                 
-
+#>
                         
-New-DbaAgentSchedule -SqlInstance $Server -Schedule $job.name -Job $job.name `
-                     -FrequencyType Daily -FrequencyInterval EveryDay `
-                     -FrequencySubdayType Minutes -FrequencySubDayinterval 30 `
-                     -StartTime "001500" -EndTime "235959" -Force | Out-Null
 #endregion
 
 <#

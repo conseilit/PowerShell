@@ -5,11 +5,9 @@
 #          , and all SQL Server community members
 # http://dbatools.io
 
-
+$InstanceName = "SQL2019"
 $dbaDatabase = "_DBA"
 $CleanupTime = 15 <# days #> * 24
-$defaultbackuplocation = "\\Rebond\Backup"
-
 
 # connect the instance
 $Server = Connect-DbaInstance -SqlInstance $InstanceName
@@ -17,6 +15,15 @@ $Server = Connect-DbaInstance -SqlInstance $InstanceName
 #$Server = Connect-DbaInstance -SqlInstance $InstanceName -SqlCredential $cred
 $Server | Select-Object DomainInstanceName,VersionMajor,DatabaseEngineEdition
 
+#region alter default backup folder
+<#
+$Server.BackupDirectory = "\\xxxxxxxx\yyyyy"
+$Server.alter()
+$Server = Connect-DbaInstance -SqlInstance $InstanceName
+$Server  | Select-Object DomainInstanceName,VersionMajor,DatabaseEngineEdition
+#>
+#endregion
+$Server.BackupDirectory
 
 #region SQL Server properties configuration
 
@@ -41,8 +48,8 @@ $Server | Select-Object DomainInstanceName,VersionMajor,DatabaseEngineEdition
         ALTER EVENT SESSION [system_health] ON SERVER
         ADD TARGET package0.event_file
             (SET filename=N'system_health.xel',
-                max_file_size=(10),
-                max_rollover_files=(200)
+                max_file_size=(100),
+                max_rollover_files=(10)
             )
     " | Out-Null
     Start-DbaXESession -SqlInstance $Server -Session "system_health" | Out-Null
@@ -57,8 +64,8 @@ $Server | Select-Object DomainInstanceName,VersionMajor,DatabaseEngineEdition
         ALTER EVENT SESSION [AlwaysOn_health] ON SERVER
         ADD TARGET package0.event_file
             (SET filename=N'AlwaysOn_health.xel',
-                max_file_size=(25),
-                max_rollover_files=(20)
+                max_file_size=(100),
+                max_rollover_files=(10)
             )
 
     " | Out-Null
@@ -84,7 +91,7 @@ $Server | Select-Object DomainInstanceName,VersionMajor,DatabaseEngineEdition
                 WHERE ([package0].[greater_than_equal_uint64]([duration],(250000)))),
             ADD EVENT sqlserver.xml_deadlock_report(
                 ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,sqlserver.query_hash,sqlserver.session_id,sqlserver.sql_text,sqlserver.username))
-            ADD TARGET package0.event_file(SET filename=N'PerformanceIssues',max_file_size=(50),max_rollover_files=(10))
+            ADD TARGET package0.event_file(SET filename=N'PerformanceIssues',max_file_size=(100),max_rollover_files=(10))
             WITH (MAX_MEMORY=4096 KB,EVENT_RETENTION_MODE=ALLOW_SINGLE_EVENT_LOSS,MAX_DISPATCH_LATENCY=30 SECONDS,MAX_EVENT_SIZE=0 KB,MEMORY_PARTITION_MODE=NONE,TRACK_CAUSALITY=ON,STARTUP_STATE=ON)
     " | Out-Null
     Start-DbaXESession -SqlInstance $Server -Session "PerformanceIssues"| Out-Null
@@ -104,7 +111,7 @@ $Server | Select-Object DomainInstanceName,VersionMajor,DatabaseEngineEdition
         ADD EVENT sqlserver.databases_log_file_size_changed(
             ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,sqlserver.session_id,sqlserver.sql_text)
             WHERE ([database_id]=(2) AND [session_id]>(50)))
-        ADD TARGET package0.event_file(SET filename=N'TempDBAutogrowth',max_file_size=(50),max_rollover_files=(10))
+        ADD TARGET package0.event_file(SET filename=N'TempDBAutogrowth',max_file_size=(100),max_rollover_files=(10))
         WITH (MAX_MEMORY=4096 KB,EVENT_RETENTION_MODE=ALLOW_SINGLE_EVENT_LOSS,MAX_DISPATCH_LATENCY=30 SECONDS,MAX_EVENT_SIZE=0 KB,MEMORY_PARTITION_MODE=NONE,TRACK_CAUSALITY=ON,STARTUP_STATE=ON)
     " | Out-Null
 
