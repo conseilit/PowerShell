@@ -1,26 +1,15 @@
 
-# Script based on dbaTools commands
+# SQL Server configuration Script based on dbaTools commands
 # Thanks to Chrissy LeMaire (@cl | https://blog.netnerds.net/ )
 #          , Rob Sewell (@SQLDBAWithBeard | https://sqldbawithabeard.com/)
-#          , and all SQL Server community
+#          , and all SQL Server community members
 # http://dbatools.io
-# Install-Module dbatools 
-
-<#
-    # issue TLS support
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-#>
-
-Clear-Host
 
 $InstanceName = "SQL2019"
 $dbaDatabase = "_DBA"
 $CleanupTime = 15 <# days #> * 24
 
-$InstallDbaWhoIsActive = $true
-$ConfigureMemory = $true
-
-# Connect the instance
+# connect the instance
 $Server = Connect-DbaInstance -SqlInstance $InstanceName
 #$cred = Get-Credential
 #$Server = Connect-DbaInstance -SqlInstance $InstanceName -SqlCredential $cred
@@ -36,7 +25,6 @@ $Server  | Select-Object DomainInstanceName,VersionMajor,DatabaseEngineEdition
 #endregion
 $Server.BackupDirectory
 
-
 #region SQL Server properties configuration
 
     Set-DbaErrorLogConfig -SqlInstance $Server -LogCount 99 | Out-Null
@@ -45,13 +33,11 @@ $Server.BackupDirectory
     Set-DbaSpConfigure -SqlInstance $Server -name OptimizeAdhocWorkloads -value 1 | Out-Null
     Set-DbaSpConfigure -SqlInstance $Server -name CostThresholdForParallelism -value 25 | Out-Null
     Set-DbaSpConfigure -SqlInstance $Server -name DefaultBackupCompression -value 1 | Out-Null
-    Set-DbaSpConfigure -SqlInstance $Server -name BlockedProcessThreshold -value 5 | Out-Null
+    Set-DbaSpConfigure -SqlInstance $Server -name BlockedProcessThreshold -value 1 | Out-Null
     Set-DbaSpConfigure -SqlInstance $Server -name ContainmentEnabled -value 1 | Out-Null
 
-    # Adjust memory
-    if ($ConfigureMemory) {
-        Set-DbaMaxMemory -SqlInstance $Server | Out-Null
-    }
+    # adjust memory
+    #Set-DbaMaxMemory -SqlInstance $Server | Out-Null
     
     # Change the retention settings for system_health Extended Events session
     Stop-DbaXESession -SqlInstance $Server -Session "system_health"  | Out-Null
@@ -83,7 +69,7 @@ $Server.BackupDirectory
             )
 
     " | Out-Null
-	Start-DbaXESession -SqlInstance $Server -Session "AlwaysOn_health" | Out-Null
+	#Start-DbaXESession -SqlInstance $Server -Session "AlwaysOn_health" | Out-Null
 	
     # Stop collecting noise events
     # https://www.sqlskills.com/blogs/erin/the-security_error_ring_buffer_recorded-event-and-why-you-dont-need-it/
@@ -125,7 +111,7 @@ $Server.BackupDirectory
         ADD EVENT sqlserver.databases_log_file_size_changed(
             ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,sqlserver.session_id,sqlserver.sql_text)
             WHERE ([database_id]=(2) AND [session_id]>(50)))
-        ADD TARGET package0.event_file(SET filename=N'TempDBAutogrowth',max_file_size=(50),max_rollover_files=(10))
+        ADD TARGET package0.event_file(SET filename=N'TempDBAutogrowth',max_file_size=(10),max_rollover_files=(5))
         WITH (MAX_MEMORY=4096 KB,EVENT_RETENTION_MODE=ALLOW_SINGLE_EVENT_LOSS,MAX_DISPATCH_LATENCY=30 SECONDS,MAX_EVENT_SIZE=0 KB,MEMORY_PARTITION_MODE=NONE,TRACK_CAUSALITY=ON,STARTUP_STATE=ON)
     " | Out-Null
 
@@ -136,27 +122,22 @@ $Server.BackupDirectory
         Set-DbaAgentServer -SqlInstance $Server -MaximumHistoryRows 999999 -MaximumJobHistoryRows 999999 | Out-Null
     }
 
-   
 #endregion
 
 
 # Create DBA database if needed
 if (!(Get-DbaDatabase -SqlInstance $Server -Database $dbaDatabase )){
-    $dbaDB = New-DbaDatabase -SqlInstance $Server -Name $dbaDatabase -Owner sa  | Out-Null
-    $dbaDB | Set-DbaDbRecoveryModel -RecoveryModel Simple -Confirm:$false | Out-Null
+    New-DbaDatabase -SqlInstance $Server -Name $dbaDatabase -Owner sa -RecoveryModel Simple | Out-Null
     Write-Host "[$dbaDatabase] database created"
 } else {
     Write-Host "[$dbaDatabase] database already exists"
 }
 
-
 # Install sp_whoisactive stored procedure. Thanks Adam Machanic 
 # Feedback: mailto:adam@dataeducation.com
 # Updates: http://whoisactive.com
 # Blog: http://dataeducation.com
-if ($InstallDbaWhoIsActive) {
-    Install-DbaWhoIsActive -SqlInstance $Server -Database $dbaDatabase | Out-Null
-}
+Install-DbaWhoIsActive -SqlInstance $Server -Database $dbaDatabase | Out-Null
 
 
 #region Install Database maintenance objects
@@ -252,17 +233,17 @@ if ($InstallDbaWhoIsActive) {
 #region Creating jobs for instance housekeeping
 $job = New-DbaAgentJob -SqlInstance $Server -Job '_DBA - HouseKeeping' -Category "Database Maintenance" -OwnerLogin sa
 
+New-DbaAgentSchedule -SqlInstance $Server -Schedule $job.name -Job $job.name `
+                     -FrequencyType Daily -FrequencyInterval Everyday `
+                     -FrequencySubdayType Time -FrequencySubDayinterval 0 `
+                     -StartTime "000001" -EndTime "235959" -Force | Out-Null
+
 New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "Cycle Errorlog" -Force `
                     -Database master -StepId 1 `
                     -Subsystem "TransactSql" `
                     -Command "EXEC msdb.dbo.sp_cycle_errorlog" `
                     -OnSuccessAction GoToNextStep `
                     -OnFailAction QuitWithFailure | Out-Null
-
-New-DbaAgentSchedule -SqlInstance $Server -Schedule $job.name -Job $job.name `
-                    -FrequencyType Daily -FrequencyInterval Everyday `
-                    -FrequencySubdayType Time -FrequencySubDayinterval 0 `
-                    -StartTime "000001" -EndTime "235959" -Force | Out-Null
 
 New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "CommandLog Cleanup" -Force `
                     -Database master -StepId 2 `
@@ -316,12 +297,12 @@ New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseBacku
                     -OnSuccessAction QuitWithSuccess `
                     -OnFailAction QuitWithFailure | Out-Null             
                     
-
 #endregion
+
 
 #region Database backup
 $job = New-DbaAgentJob -SqlInstance $Server -Job '_DBA - USER_DATABASES - FULL' -Category "Database Maintenance" -OwnerLogin sa
-                        
+
 New-DbaAgentSchedule -SqlInstance $Server -Schedule $job.name -Job $job.name `
                     -FrequencyType Weekly -FrequencyInterval Sunday `
                     -FrequencySubdayType Time -FrequencySubDayinterval 0 -FrequencyRecurrenceFactor 1 `
@@ -347,8 +328,7 @@ New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseBacku
                     -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='DatabaseBackup - USER_DATABASES - FULL', @WaitTime = '00:01:00'" `
                     -OnSuccessAction QuitWithSuccess `
                     -OnFailAction QuitWithFailure | Out-Null                        
-
-
+                        
 #endregion
 
 #region Diff backup
@@ -379,47 +359,34 @@ New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseBacku
                     -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='DatabaseBackup - USER_DATABASES - DIFF', @WaitTime = '00:01:00'" `
                     -OnSuccessAction QuitWithSuccess `
                     -OnFailAction QuitWithFailure | Out-Null                       
+
                         
+
 #endregion
 
 #region Log backup
 $job = New-DbaAgentJob -SqlInstance $Server -Job '_DBA - USER_DATABASES - LOG' -Category "Database Maintenance" -OwnerLogin sa 
-
+                        
 New-DbaAgentSchedule -SqlInstance $Server -Schedule $job.name -Job $job.name `
                      -FrequencyType Daily -FrequencyInterval EveryDay `
                      -FrequencySubdayType Minutes -FrequencySubDayinterval 30 `
                      -StartTime "001500" -EndTime "235959" -Force | Out-Null
 
+                     
 New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseBackup - USER_DATABASES - LOG" -Force `
                     -Database master -StepId 1 `
                     -Subsystem "TransactSql" `
                     -Command "EXEC msdb.dbo.sp_start_job 'DatabaseBackup - USER_DATABASES - LOG'" `
-                    -OnSuccessAction GoToNextStep `
+                    -OnSuccessAction QuitWithSuccess `
                     -OnFailAction QuitWithFailure | Out-Null
 
-<#
-New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseBackup - SYSTEM_DATABASES - LOG" -Force `
-                    -Database master -StepId 2 `
-                    -Subsystem "TransactSql" `
-                    -Command "EXECUTE [$dbaDatabase].[dbo].[DatabaseBackup]
-                                @Databases = 'SYSTEM_DATABASES',
-                                @Directory = N'$defaultbackuplocation',
-                                @BackupType = 'LOG',
-                                @Verify = 'Y',
-                                @CleanupTime = $CleanupTime,
-                                @CheckSum = 'Y',
-                                @LogToTable = 'Y' " `
-                    -OnSuccessAction QuitWithSuccess `
-                    -OnFailAction QuitWithFailure | Out-Null                 
-#>
-                        
+
 #endregion
 
-<#
 
-    $Server  | Get-DbaAgentJob | Where-Object {$_.Category -match "Database Maintenance" } | format-table -autosize
 
-    Start-DbaAgentJob -SqlInstance $Server -Job "DBA - HouseKeeping"
-    Start-DbaAgentJob -SqlInstance $Server -Job "DBA - USER_DATABASES - FULL"
+# check jobs
+$Servers | Get-DbaAgentJob -Category "Database Maintenance" | format-table -AutoSize
 
-#>
+# perform system databases backup
+$Servers | Get-DbaAgentJob -Job "DatabaseBackup - SYSTEM_DATABASES - FULL" | Start-DbaAgentJob | Format-Table -AutoSize
