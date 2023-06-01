@@ -127,8 +127,7 @@ $Server.BackupDirectory
 
 # Create DBA database if needed
 if (!(Get-DbaDatabase -SqlInstance $Server -Database $dbaDatabase )){
-    $dbaDB = New-DbaDatabase -SqlInstance $Server -Name $dbaDatabase -Owner sa  | Out-Null
-    $dbaDB | Set-DbaDbRecoveryModel -RecoveryModel Simple -Confirm:$false | Out-Null
+    $dbaDB = New-DbaDatabase -SqlInstance $Server -Name $dbaDatabase -Owner sa -RecoveryModel Simple | Out-Null
     Write-Host "[$dbaDatabase] database created"
 } else {
     Write-Host "[$dbaDatabase] database already exists"
@@ -321,7 +320,7 @@ New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "IndexOptimize
                     -Subsystem "TransactSql" `
                     -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='IndexOptimize - USER_DATABASES', @WaitTime = '00:01:00'" `
                     -OnSuccessAction GoToNextStep `
-                    -OnFailAction QuitWithFailure | Out-Null                        
+                    -OnFailAction GoToNextStep | Out-Null                        
     
 New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseBackup - USER_DATABASES - FULL" -Force `
                     -Database master -StepId 3 `
@@ -352,7 +351,7 @@ New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "IndexOptimize
                     -Subsystem "TransactSql" `
                     -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='IndexOptimize - USER_DATABASES', @WaitTime = '00:01:00'" `
                     -OnSuccessAction GoToNextStep `
-                    -OnFailAction QuitWithFailure | Out-Null                        
+                    -OnFailAction GoToNextStep | Out-Null                        
     
 New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseBackup - USER_DATABASES - DIFF" -Force `
                     -Database master -StepId 3 `
