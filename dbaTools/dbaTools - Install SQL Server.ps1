@@ -53,3 +53,22 @@ $Servers | Select-Object DomainInstanceName,VersionMajor,Edition
 # Connect using SQL authentication
 $Servers = Connect-DbaInstance -SqlInstance SQL15AG1,SQL15AG2 -SqlCredential $saCred
 $Servers | get-dbaDatabase | format-table -autosize
+
+
+<#
+# default install on C drive
+Install-DbaInstance -SqlInstance SRVSQL `
+                    -Credential $InstallCred `
+                    -Version 2012 `
+                    -Feature Engine,Replication,FullText,IntegrationServices `
+                    -AuthenticationMode Mixed `
+                    -AdminAccount $CurrentUser `
+                    -SaCredential $saCred `
+                    -PerformVolumeMaintenanceTasks `
+                    -Confirm:$false
+
+# Connect using Windows authentication
+$Servers = Connect-DbaInstance -SqlInstance SRVSQL
+$Servers | Select-Object DomainInstanceName,VersionMajor,Edition
+
+#>

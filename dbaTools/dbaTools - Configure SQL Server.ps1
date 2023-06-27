@@ -5,15 +5,28 @@
 #          , and all SQL Server community members
 # http://dbatools.io
 
-$InstanceName = "SQL2019"
+$InstanceName = "SrvSQL"
 $dbaDatabase = "_DBA"
 $CleanupTime = 15 <# days #> * 24
+
+# Due to changes by MS https://blog.netnerds.net/2023/03/new-defaults-for-sql-server-connections-encryption-trust-certificate/
+Set-DbatoolsInsecureConnection -SessionOnly 
 
 # connect the instance
 $Server = Connect-DbaInstance -SqlInstance $InstanceName
 #$cred = Get-Credential
 #$Server = Connect-DbaInstance -SqlInstance $InstanceName -SqlCredential $cred
 $Server | Select-Object DomainInstanceName,VersionMajor,DatabaseEngineEdition
+
+<#
+# Check if SQL Agent is stopped / manual
+if (!($(Get-DbaInstanceProperty -SqlInstance $Server -InstanceProperty  Edition).value -Match "Express")){
+	$AgentServiceName = (Get-DbaService -computername $InstanceName -type Agent).ServiceName
+	Set-Service $AgentServiceName -startuptype automatic
+	Start-Service $AgentServiceName
+}
+#>
+
 
 #region alter default backup folder
 <#
@@ -117,6 +130,30 @@ $Server.BackupDirectory
 
     Start-DbaXESession -SqlInstance $Server -Session "TempDBAutogrowth"| Out-Null
 
+    # Audit SA login
+    Invoke-DbaQuery -SqlInstance $server -Database "master" -Query "
+        CREATE EVENT SESSION [AuditLoginSA] ON SERVER 
+        ADD EVENT sqlserver.login(
+            ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.client_pid,
+                sqlserver.database_id,sqlserver.database_name,
+                sqlserver.session_id,sqlserver.sql_text,sqlserver.username)
+            WHERE ([sqlserver].[username]=N'sa'))
+        ADD TARGET package0.event_file(SET filename=N'AuditLoginSA',max_file_size=(20))
+        WITH (STARTUP_STATE=ON)
+    " | Out-Null
+    Start-DbaXESession -SqlInstance $server -Session "AuditLoginSA"
+
+    # AdminFoolTracking
+    Invoke-DbaQuery -SqlInstance $Server -Database "master" -Query "
+        CREATE EVENT SESSION [AdminIssues] ON SERVER 
+        ADD EVENT sqlserver.database_dropped(
+            ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,sqlserver.session_id,sqlserver.sql_text,sqlserver.username))
+        ADD TARGET package0.event_file(SET filename=N'AdminIssues',max_file_size=(10),max_rollover_files=(5))
+        WITH (MAX_MEMORY=4096 KB,EVENT_RETENTION_MODE=ALLOW_SINGLE_EVENT_LOSS,MAX_DISPATCH_LATENCY=30 SECONDS,MAX_EVENT_SIZE=0 KB,MEMORY_PARTITION_MODE=NONE,TRACK_CAUSALITY=OFF,STARTUP_STATE=ON)
+    " | Out-Null
+
+    Start-DbaXESession -SqlInstance $Server -Session "AdminIssues"| Out-Null
+
     # increase SQL Agent default retention
     if (!($(Get-DbaInstanceProperty -SqlInstance $Server -InstanceProperty  Edition).value -Match "Express")){
         Set-DbaAgentServer -SqlInstance $Server -MaximumHistoryRows 999999 -MaximumJobHistoryRows 999999 | Out-Null
@@ -127,7 +164,7 @@ $Server.BackupDirectory
 
 # Create DBA database if needed
 if (!(Get-DbaDatabase -SqlInstance $Server -Database $dbaDatabase )){
-    New-DbaDatabase -SqlInstance $Server -Name $dbaDatabase -Owner sa -RecoveryModel Simple | Out-Null
+    New-DbaDatabase -SqlInstance $Server -Name $dbaDatabase -Owner sa -RecoveryModel Simple  | Out-Null
     Write-Host "[$dbaDatabase] database created"
 } else {
     Write-Host "[$dbaDatabase] database already exists"
@@ -313,7 +350,7 @@ New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseInteg
                     -Subsystem "TransactSql" `
                     -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='DatabaseIntegrityCheck - USER_DATABASES', @WaitTime = '00:01:00'" `
                     -OnSuccessAction GoToNextStep `
-                    -OnFailAction QuitWithFailure | Out-Null
+                    -OnFailAction GoToNextStep | Out-Null
 
 New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "IndexOptimize - USER_DATABASES" -Force `
                     -Database master -StepId 2 `
@@ -344,7 +381,7 @@ New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseInteg
                     -Subsystem "TransactSql" `
                     -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='DatabaseIntegrityCheck - USER_DATABASES', @WaitTime = '00:01:00'" `
                     -OnSuccessAction GoToNextStep `
-                    -OnFailAction QuitWithFailure | Out-Null
+                    -OnFailAction GoToNextStep | Out-Null
 
 New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "IndexOptimize - USER_DATABASES" -Force `
                     -Database master -StepId 2 `
@@ -390,4 +427,3 @@ $Servers | Get-DbaAgentJob -Category "Database Maintenance" | format-table -Auto
 
 # perform system databases backup
 $Servers | Get-DbaAgentJob -Job "DatabaseBackup - SYSTEM_DATABASES - FULL" | Start-DbaAgentJob | Format-Table -AutoSize
-
