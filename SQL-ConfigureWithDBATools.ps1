@@ -52,108 +52,133 @@ $Server.BackupDirectory
     # adjust memory
     #Set-DbaMaxMemory -SqlInstance $Server | Out-Null
     
-    # Change the retention settings for system_health Extended Events session
-    Stop-DbaXESession -SqlInstance $Server -Session "system_health"  | Out-Null
-    Invoke-DbaQuery -SqlInstance $Server -Database "master" -Query "
-        ALTER EVENT SESSION [system_health] ON SERVER
-        DROP TARGET package0.event_file;
-        GO
-        ALTER EVENT SESSION [system_health] ON SERVER
-        ADD TARGET package0.event_file
-            (SET filename=N'system_health.xel',
-                max_file_size=(100),
-                max_rollover_files=(10)
-            )
-    " | Out-Null
-    Start-DbaXESession -SqlInstance $Server -Session "system_health" | Out-Null
-
-
-    # Change the retention settings for AlwaysOn_health Extended Events session
-    Stop-DbaXESession -SqlInstance $Server -Session "AlwaysOn_health" | Out-Null
-    Invoke-DbaQuery -SqlInstance $Server -Database "master" -Query "
-        ALTER EVENT SESSION [AlwaysOn_health] ON SERVER
-        DROP TARGET package0.event_file;
-        GO
-        ALTER EVENT SESSION [AlwaysOn_health] ON SERVER
-        ADD TARGET package0.event_file
-            (SET filename=N'AlwaysOn_health.xel',
-                max_file_size=(100),
-                max_rollover_files=(10)
-            )
-
-    " | Out-Null
-	#Start-DbaXESession -SqlInstance $Server -Session "AlwaysOn_health" | Out-Null
-	
-    # Stop collecting noise events
-    # https://www.sqlskills.com/blogs/erin/the-security_error_ring_buffer_recorded-event-and-why-you-dont-need-it/
-    Invoke-DbaQuery -SqlInstance $Server -Database "master" -Query "
-        ALTER EVENT SESSION [system_health] ON SERVER
-        DROP EVENT sqlserver.security_error_ring_buffer_recorded;
-    " | Out-Null
-
     
-    Invoke-DbaQuery -SqlInstance $Server -Database "master" -Query "
-            CREATE EVENT SESSION [PerformanceIssues] ON SERVER 
-            ADD EVENT sqlserver.blocked_process_report(
-                ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,sqlserver.query_hash,sqlserver.session_id,sqlserver.sql_text,sqlserver.username)),
-            ADD EVENT sqlserver.rpc_completed(SET collect_statement=(1)
-                ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,sqlserver.query_hash,sqlserver.session_id,sqlserver.sql_text,sqlserver.username)
-                WHERE ([package0].[greater_than_equal_uint64]([duration],(250000)))),
-            ADD EVENT sqlserver.sql_batch_completed(
-                ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,sqlserver.query_hash,sqlserver.session_id,sqlserver.sql_text,sqlserver.username)
-                WHERE ([package0].[greater_than_equal_uint64]([duration],(250000)))),
-            ADD EVENT sqlserver.xml_deadlock_report(
-                ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,sqlserver.query_hash,sqlserver.session_id,sqlserver.sql_text,sqlserver.username))
-            ADD TARGET package0.event_file(SET filename=N'PerformanceIssues',max_file_size=(100),max_rollover_files=(10))
+    if ($(Get-DbaInstanceProperty -SqlInstance $Server -InstanceProperty  versionMajor).value -le 14) {
+
+        # Change the retention settings for system_health Extended Events session
+        Stop-DbaXESession -SqlInstance $Server -Session "system_health"  | Out-Null
+        Invoke-DbaQuery -SqlInstance $Server -Database "master" -Query "
+            ALTER EVENT SESSION [system_health] ON SERVER
+            DROP TARGET package0.event_file;
+            GO
+            ALTER EVENT SESSION [system_health] ON SERVER
+            ADD TARGET package0.event_file
+                (SET filename=N'system_health.xel',
+                    max_file_size=(100),
+                    max_rollover_files=(10)
+                )
+        " | Out-Null
+        Start-DbaXESession -SqlInstance $Server -Session "system_health" | Out-Null
+
+
+        # Change the retention settings for AlwaysOn_health Extended Events session
+        $XEStatus = (Get-DbaXESession -SqlInstance $Server -Session "AlwaysOn_health").Status
+        If ($XEStatus -eq "Started"){
+            Stop-DbaXESession -SqlInstance $Server -Session "AlwaysOn_health" | Out-Null
+        }
+        Invoke-DbaQuery -SqlInstance $Server -Database "master" -Query "
+            ALTER EVENT SESSION [AlwaysOn_health] ON SERVER
+            DROP TARGET package0.event_file;
+            GO
+            ALTER EVENT SESSION [AlwaysOn_health] ON SERVER
+            ADD TARGET package0.event_file
+                (SET filename=N'AlwaysOn_health.xel',
+                    max_file_size=(100),
+                    max_rollover_files=(10)
+                )
+
+        " | Out-Null
+        If ($XEStatus -eq "Started"){
+            Start-DbaXESession -SqlInstance $Server -Session "AlwaysOn_health" | Out-Null
+        }
+    }
+        
+    if ($(Get-DbaInstanceProperty -SqlInstance $Server -InstanceProperty  versionMajor).value -ge 11) {
+
+        # Stop collecting noise events
+        # https://www.sqlskills.com/blogs/erin/the-security_error_ring_buffer_recorded-event-and-why-you-dont-need-it/
+        Invoke-DbaQuery -SqlInstance $Server -Database "master" -Query "
+            ALTER EVENT SESSION [system_health] ON SERVER
+            DROP EVENT sqlserver.security_error_ring_buffer_recorded;
+        " | Out-Null
+
+        
+        Invoke-DbaQuery -SqlInstance $Server -Database "master" -Query "
+                CREATE EVENT SESSION [PerformanceIssues] ON SERVER 
+                ADD EVENT sqlserver.blocked_process_report(
+                    ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,sqlserver.query_hash,sqlserver.session_id,sqlserver.sql_text,sqlserver.username)),
+                ADD EVENT sqlserver.rpc_completed(SET collect_statement=(1)
+                    ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,sqlserver.query_hash,sqlserver.session_id,sqlserver.sql_text,sqlserver.username)
+                    WHERE ([package0].[greater_than_equal_uint64]([duration],(250000)))),
+                ADD EVENT sqlserver.sql_batch_completed(
+                    ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,sqlserver.query_hash,sqlserver.session_id,sqlserver.sql_text,sqlserver.username)
+                    WHERE ([package0].[greater_than_equal_uint64]([duration],(250000)))),
+                ADD EVENT sqlserver.xml_deadlock_report(
+                    ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,sqlserver.query_hash,sqlserver.session_id,sqlserver.sql_text,sqlserver.username))
+                ADD TARGET package0.event_file(SET filename=N'PerformanceIssues',max_file_size=(100),max_rollover_files=(10))
+                WITH (MAX_MEMORY=4096 KB,EVENT_RETENTION_MODE=ALLOW_SINGLE_EVENT_LOSS,MAX_DISPATCH_LATENCY=30 SECONDS,MAX_EVENT_SIZE=0 KB,MEMORY_PARTITION_MODE=NONE,TRACK_CAUSALITY=ON,STARTUP_STATE=ON)
+        " | Out-Null
+        Start-DbaXESession -SqlInstance $Server -Session "PerformanceIssues"| Out-Null
+
+        # maybe remove the event from system_health
+        Invoke-DbaQuery -SqlInstance $Server -Database "master" -Query "
+            ALTER EVENT SESSION [system_health] ON SERVER
+            DROP EVENT sqlserver.xml_deadlock_report;
+        " | Out-Null
+
+        # TempDB autogrowth
+        Invoke-DbaQuery -SqlInstance $Server -Database "master" -Query "
+            CREATE EVENT SESSION [TempDBAutogrowth] ON SERVER 
+            ADD EVENT sqlserver.database_file_size_change(
+                ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,sqlserver.session_id,sqlserver.sql_text)
+                WHERE ([database_id]=(2) AND [session_id]>(50))),
+            ADD EVENT sqlserver.databases_log_file_size_changed(
+                ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,sqlserver.session_id,sqlserver.sql_text)
+                WHERE ([database_id]=(2) AND [session_id]>(50)))
+            ADD TARGET package0.event_file(SET filename=N'TempDBAutogrowth',max_file_size=(10),max_rollover_files=(5))
             WITH (MAX_MEMORY=4096 KB,EVENT_RETENTION_MODE=ALLOW_SINGLE_EVENT_LOSS,MAX_DISPATCH_LATENCY=30 SECONDS,MAX_EVENT_SIZE=0 KB,MEMORY_PARTITION_MODE=NONE,TRACK_CAUSALITY=ON,STARTUP_STATE=ON)
-    " | Out-Null
-    Start-DbaXESession -SqlInstance $Server -Session "PerformanceIssues"| Out-Null
+        " | Out-Null
 
-	# maybe remove the event from system_health
-	Invoke-DbaQuery -SqlInstance $Server -Database "master" -Query "
-		ALTER EVENT SESSION [system_health] ON SERVER
-		DROP EVENT sqlserver.xml_deadlock_report;
-	" | Out-Null
+        Start-DbaXESession -SqlInstance $Server -Session "TempDBAutogrowth"| Out-Null
 
-    # TempDB autogrowth
-    Invoke-DbaQuery -SqlInstance $Server -Database "master" -Query "
-        CREATE EVENT SESSION [TempDBAutogrowth] ON SERVER 
-        ADD EVENT sqlserver.database_file_size_change(
-            ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,sqlserver.session_id,sqlserver.sql_text)
-            WHERE ([database_id]=(2) AND [session_id]>(50))),
-        ADD EVENT sqlserver.databases_log_file_size_changed(
-            ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,sqlserver.session_id,sqlserver.sql_text)
-            WHERE ([database_id]=(2) AND [session_id]>(50)))
-        ADD TARGET package0.event_file(SET filename=N'TempDBAutogrowth',max_file_size=(10),max_rollover_files=(5))
-        WITH (MAX_MEMORY=4096 KB,EVENT_RETENTION_MODE=ALLOW_SINGLE_EVENT_LOSS,MAX_DISPATCH_LATENCY=30 SECONDS,MAX_EVENT_SIZE=0 KB,MEMORY_PARTITION_MODE=NONE,TRACK_CAUSALITY=ON,STARTUP_STATE=ON)
-    " | Out-Null
+		# UserDB Log Autogrowth
+		Invoke-DbaQuery -SqlInstance $Server -Database "master" -Query "
+            CREATE EVENT SESSION [UserDBLogAutogrowth] ON SERVER 
+            ADD EVENT sqlserver.databases_log_file_size_changed(
+                ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,sqlserver.session_id,sqlserver.sql_text)
+                WHERE ([database_id]>(4) AND [session_id]>(50)))
+            ADD TARGET package0.event_file(SET filename=N'UserDBLogAutogrowth',max_file_size=(10),max_rollover_files=(5))
+            WITH (MAX_MEMORY=4096 KB,EVENT_RETENTION_MODE=ALLOW_SINGLE_EVENT_LOSS,MAX_DISPATCH_LATENCY=30 SECONDS,MAX_EVENT_SIZE=0 KB,MEMORY_PARTITION_MODE=NONE,TRACK_CAUSALITY=ON,STARTUP_STATE=ON)
+        " | Out-Null
 
-    Start-DbaXESession -SqlInstance $Server -Session "TempDBAutogrowth"| Out-Null
+		Start-DbaXESession -SqlInstance $Server -Session "UserDBLogAutogrowth"| Out-Null
 
-    # Audit SA login
-    Invoke-DbaQuery -SqlInstance $server -Database "master" -Query "
-        CREATE EVENT SESSION [AuditLoginSA] ON SERVER 
-        ADD EVENT sqlserver.login(
-            ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.client_pid,
-                sqlserver.database_id,sqlserver.database_name,
-                sqlserver.session_id,sqlserver.sql_text,sqlserver.username)
-            WHERE ([sqlserver].[username]=N'sa'))
-        ADD TARGET package0.event_file(SET filename=N'AuditLoginSA',max_file_size=(20))
-        WITH (STARTUP_STATE=ON)
-    " | Out-Null
-    Start-DbaXESession -SqlInstance $server -Session "AuditLoginSA"
 
-    # AdminFoolTracking
-    Invoke-DbaQuery -SqlInstance $Server -Database "master" -Query "
-        CREATE EVENT SESSION [AdminIssues] ON SERVER 
-        ADD EVENT sqlserver.database_dropped(
-            ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,sqlserver.session_id,sqlserver.sql_text,sqlserver.username))
-        ADD TARGET package0.event_file(SET filename=N'AdminIssues',max_file_size=(10),max_rollover_files=(5))
-        WITH (MAX_MEMORY=4096 KB,EVENT_RETENTION_MODE=ALLOW_SINGLE_EVENT_LOSS,MAX_DISPATCH_LATENCY=30 SECONDS,MAX_EVENT_SIZE=0 KB,MEMORY_PARTITION_MODE=NONE,TRACK_CAUSALITY=OFF,STARTUP_STATE=ON)
-    " | Out-Null
+        # Audit SA login
+        Invoke-DbaQuery -SqlInstance $server -Database "master" -Query "
+            CREATE EVENT SESSION [AuditLoginSA] ON SERVER 
+            ADD EVENT sqlserver.login(
+                ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.client_pid,
+                    sqlserver.database_id,sqlserver.database_name,
+                    sqlserver.session_id,sqlserver.sql_text,sqlserver.username)
+                WHERE ([sqlserver].[username]=N'sa'))
+            ADD TARGET package0.event_file(SET filename=N'AuditLoginSA',max_file_size=(20))
+            WITH (STARTUP_STATE=ON)
+        " | Out-Null
+        Start-DbaXESession -SqlInstance $server -Session "AuditLoginSA"
 
-    Start-DbaXESession -SqlInstance $Server -Session "AdminIssues"| Out-Null
+        # AdminFoolTracking
+        Invoke-DbaQuery -SqlInstance $Server -Database "master" -Query "
+            CREATE EVENT SESSION [AdminIssues] ON SERVER 
+            ADD EVENT sqlserver.database_dropped(
+                ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,sqlserver.session_id,sqlserver.sql_text,sqlserver.username))
+            ADD TARGET package0.event_file(SET filename=N'AdminIssues',max_file_size=(10),max_rollover_files=(5))
+            WITH (MAX_MEMORY=4096 KB,EVENT_RETENTION_MODE=ALLOW_SINGLE_EVENT_LOSS,MAX_DISPATCH_LATENCY=30 SECONDS,MAX_EVENT_SIZE=0 KB,MEMORY_PARTITION_MODE=NONE,TRACK_CAUSALITY=OFF,STARTUP_STATE=ON)
+        " | Out-Null
 
+        Start-DbaXESession -SqlInstance $Server -Session "AdminIssues"| Out-Null
+    }
+    
     # increase SQL Agent default retention
     if (!($(Get-DbaInstanceProperty -SqlInstance $Server -InstanceProperty  Edition).value -Match "Express")){
         Set-DbaAgentServer -SqlInstance $Server -MaximumHistoryRows 999999 -MaximumJobHistoryRows 999999 | Out-Null
@@ -280,35 +305,35 @@ New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "Cycle Errorlo
                     -Subsystem "TransactSql" `
                     -Command "EXEC msdb.dbo.sp_cycle_errorlog" `
                     -OnSuccessAction GoToNextStep `
-                    -OnFailAction QuitWithFailure | Out-Null
+                    -OnFailAction GoToNextStep | Out-Null
 
 New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "CommandLog Cleanup" -Force `
                     -Database master -StepId 2 `
                     -Subsystem "TransactSql" `
                     -Command "EXEC msdb.dbo.sp_start_job 'CommandLog Cleanup'" `
                     -OnSuccessAction GoToNextStep `
-                    -OnFailAction QuitWithFailure | Out-Null                        
+                    -OnFailAction GoToNextStep | Out-Null                        
     
 New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "Output File Cleanup" -Force `
                     -Database master -StepId 3 `
                     -Subsystem "TransactSql" `
                     -Command "EXEC msdb.dbo.sp_start_job 'Output File Cleanup'" `
                     -OnSuccessAction GoToNextStep `
-                    -OnFailAction QuitWithFailure | Out-Null                        
+                    -OnFailAction GoToNextStep | Out-Null                        
 
 New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "sp_delete_backuphistory" -Force `
                     -Database master -StepId 4 `
                     -Subsystem "TransactSql" `
                     -Command "EXEC msdb.dbo.sp_start_job 'sp_delete_backuphistory'" `
                     -OnSuccessAction GoToNextStep `
-                    -OnFailAction QuitWithFailure | Out-Null                        
+                    -OnFailAction GoToNextStep | Out-Null                        
 
 New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "sp_purge_jobhistory" -Force `
                     -Database master -StepId 5  `
                     -Subsystem "TransactSql" `
                     -Command "EXEC msdb.dbo.sp_start_job 'sp_purge_jobhistory'" `
                     -OnSuccessAction GoToNextStep `
-                    -OnFailAction QuitWithFailure | Out-Null                        
+                    -OnFailAction GoToNextStep | Out-Null                        
 
 New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseMail - Database Mail cleanup" -Force `
                     -Database master -StepId 6 `
@@ -317,14 +342,14 @@ New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseMail 
                                 EXEC msdb.dbo.sysmail_delete_mailitems_sp @sent_before = @DeleteBeforeDate
                                 EXEC msdb.dbo.sysmail_delete_log_sp @logged_before = @DeleteBeforeDate" `
                     -OnSuccessAction GoToNextStep `
-                    -OnFailAction QuitWithFailure | Out-Null             
+                    -OnFailAction GoToNextStep | Out-Null             
                     
 New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseIntegrityCheck - SYSTEM_DATABASES" -Force `
                     -Database master -StepId 7 `
                     -Subsystem "TransactSql" `
                     -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='DatabaseIntegrityCheck - SYSTEM_DATABASES', @WaitTime = '00:01:00'" `
                     -OnSuccessAction GoToNextStep `
-                    -OnFailAction QuitWithFailure | Out-Null             
+                    -OnFailAction GoToNextStep | Out-Null             
                     
 
 New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseBackup - SYSTEM_DATABASES - FULL" -Force `
@@ -423,7 +448,7 @@ New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseBacku
 
 
 # check jobs
-$Servers | Get-DbaAgentJob -Category "Database Maintenance" | format-table -AutoSize
+$Server | Get-DbaAgentJob -Category "Database Maintenance" | format-table -AutoSize
 
 # perform system databases backup
-$Servers | Get-DbaAgentJob -Job "DatabaseBackup - SYSTEM_DATABASES - FULL" | Start-DbaAgentJob | Format-Table -AutoSize
+$Server | Get-DbaAgentJob -Job "DatabaseBackup - SYSTEM_DATABASES - FULL" | Start-DbaAgentJob | Format-Table -AutoSize
