@@ -1,22 +1,52 @@
+#==============================================================================
+#
+#  Summary:  SQL Server configuration using dbaTools
+#
+#  ----------------------------------------------------------------------------
+#  Written by Christophe LAPORTE, SQL Server MVP / MCM
+#	Blog    : http://conseilit.wordpress.com
+#	Twitter : @ConseilIT
+#  
+#  You may alter this code for your own *non-commercial* purposes. You may
+#  republish altered code as long as you give due credit.
+#  
+#  THIS CODE AND INFORMATION ARE PROVIDED "AS IS" WITHOUT WARRANTY OF 
+#  ANY KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING BUT NOT LIMITED 
+#  TO THE IMPLIED WARRANTIES OF MERCHANTABILITY AND/OR FITNESS FOR A
+#  PARTICULAR PURPOSE.
+#==============================================================================
 
-# SQL Server configuration Script based on dbaTools commands
+#
+# Script based on dbaTools commands
 # Thanks to Chrissy LeMaire (@cl | https://blog.netnerds.net/ )
 #          , Rob Sewell (@SQLDBAWithBeard | https://sqldbawithabeard.com/)
-#          , and all SQL Server community members
+#          , and all SQL Server community
 # http://dbatools.io
+# Install-Module dbatools 
+#
 
+
+Clear-Host
 $InstanceName = "SrvSQL"
 $dbaDatabase = "_DBA"
 $CleanupTime = 15 <# days #> * 24
 
-# Due to changes by MS https://blog.netnerds.net/2023/03/new-defaults-for-sql-server-connections-encryption-trust-certificate/
-Set-DbatoolsInsecureConnection -SessionOnly 
 
-# connect the instance
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+if ((Get-InstalledModule -Name "dbatools").version.major -ge 2) {
+    # Due to changes by MS https://blog.netnerds.net/2023/03/new-defaults-for-sql-server-connections-encryption-trust-certificate/
+    Set-DbatoolsInsecureConnection -SessionOnly 
+}
+
+# check connection to the instance
 $Server = Connect-DbaInstance -SqlInstance $InstanceName
 #$cred = Get-Credential
 #$Server = Connect-DbaInstance -SqlInstance $InstanceName -SqlCredential $cred
-$Server | Select-Object DomainInstanceName,VersionMajor,DatabaseEngineEdition
+#$Server | Select-Object DomainInstanceName,VersionMajor,DatabaseEngineEdition
+$Server | Select-Object DomainInstanceName,VersionMajor,DatabaseEngineEdition,Edition,ServiceAccount
+#$defaultbackuplocation = (Get-DbaDefaultPath -SqlInstance $Server).Backup
+#$defaultbackuplocation = "" # Put some folder here to not use default backup directory
 
 <#
 # Check if SQL Agent is stopped / manual
@@ -29,14 +59,28 @@ if (!($(Get-DbaInstanceProperty -SqlInstance $Server -InstanceProperty  Edition)
 
 
 #region alter default backup folder
-<#
-$Server.BackupDirectory = "\\xxxxxxxx\yyyyy"
-$Server.alter()
-$Server = Connect-DbaInstance -SqlInstance $InstanceName
-$Server  | Select-Object DomainInstanceName,VersionMajor,DatabaseEngineEdition
-#>
+    <#
+    $Server.BackupDirectory = "\\xxxxxxxx\yyyyy"
+    $Server.alter()
+    $Server = Connect-DbaInstance -SqlInstance $InstanceName
+    $Server  | Select-Object DomainInstanceName,VersionMajor,DatabaseEngineEdition
+    #>
 #endregion
-$Server.BackupDirectory
+
+<#
+#region TempDB configuration
+
+    $TempDBLogPath = split-path (Get-DbaDBFile -SqlInstance $Server -Database TempDB | Where-Object {$_.ID -eq 2}).PhysicalName -Parent
+    $TempDBDataPath = split-path (Get-DbaDBFile -SqlInstance $Server -Database TempDB | Where-Object {$_.ID -eq 1}).PhysicalName -Parent
+
+    $TempDBDataFileCount = $(Get-DbaInstanceProperty -SqlInstance $Server  -InstanceProperty  Processors).value
+    $TempDBDataFileSizeMB = $TempDBDataFileCount * 1024 
+
+    Set-DbaTempDbConfig -SqlInstance $Server -DataFileCount $TempDBDataFileCount `
+        -DataPath $TempDBDataPath -LogPath $TempDBLogPath -DataFileSize $TempDBDataFileSizeMB 
+
+#endregion
+#>
 
 #region SQL Server properties configuration
 
@@ -49,10 +93,9 @@ $Server.BackupDirectory
     Set-DbaSpConfigure -SqlInstance $Server -name BlockedProcessThreshold -value 1 | Out-Null
     Set-DbaSpConfigure -SqlInstance $Server -name ContainmentEnabled -value 1 | Out-Null
 
-    # adjust memory
+    # Adjust memory
     #Set-DbaMaxMemory -SqlInstance $Server | Out-Null
     
-        
     if ($(Get-DbaInstanceProperty -SqlInstance $Server -InstanceProperty  versionMajor).value -le 14) {
 
         # Change the retention settings for system_health Extended Events session
@@ -104,19 +147,24 @@ $Server.BackupDirectory
 
         
         Invoke-DbaQuery -SqlInstance $Server -Database "master" -Query "
-                CREATE EVENT SESSION [PerformanceIssues] ON SERVER 
-                ADD EVENT sqlserver.blocked_process_report(
-                    ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,sqlserver.query_hash,sqlserver.session_id,sqlserver.sql_text,sqlserver.username)),
+            CREATE EVENT SESSION [PerformanceIssues] ON SERVER 
                 ADD EVENT sqlserver.rpc_completed(SET collect_statement=(1)
-                    ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,sqlserver.query_hash,sqlserver.session_id,sqlserver.sql_text,sqlserver.username)
+                    ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,
+                        sqlserver.query_hash,sqlserver.session_id,sqlserver.sql_text,sqlserver.username,sqlserver.transaction_id)
                     WHERE ([package0].[greater_than_equal_uint64]([duration],(250000)))),
                 ADD EVENT sqlserver.sql_batch_completed(
-                    ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,sqlserver.query_hash,sqlserver.session_id,sqlserver.sql_text,sqlserver.username)
+                    ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,
+                        sqlserver.query_hash,sqlserver.session_id,sqlserver.sql_text,sqlserver.username,sqlserver.transaction_id)
                     WHERE ([package0].[greater_than_equal_uint64]([duration],(250000)))),
+                ADD EVENT sqlserver.blocked_process_report(
+                    ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,
+                        sqlserver.query_hash,sqlserver.session_id,sqlserver.sql_text,sqlserver.username,sqlserver.transaction_id)),
                 ADD EVENT sqlserver.xml_deadlock_report(
-                    ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,sqlserver.query_hash,sqlserver.session_id,sqlserver.sql_text,sqlserver.username))
+                    ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,
+                        sqlserver.query_hash,sqlserver.session_id,sqlserver.sql_text,sqlserver.username,sqlserver.transaction_id))
                 ADD TARGET package0.event_file(SET filename=N'PerformanceIssues',max_file_size=(100),max_rollover_files=(10))
-                WITH (MAX_MEMORY=4096 KB,EVENT_RETENTION_MODE=ALLOW_SINGLE_EVENT_LOSS,MAX_DISPATCH_LATENCY=30 SECONDS,MAX_EVENT_SIZE=0 KB,MEMORY_PARTITION_MODE=NONE,TRACK_CAUSALITY=ON,STARTUP_STATE=ON)
+                    WITH (MAX_MEMORY=4096 KB,EVENT_RETENTION_MODE=ALLOW_SINGLE_EVENT_LOSS,MAX_DISPATCH_LATENCY=30 SECONDS,
+                        MAX_EVENT_SIZE=0 KB,MEMORY_PARTITION_MODE=NONE,TRACK_CAUSALITY=ON,STARTUP_STATE=ON);
         " | Out-Null
         Start-DbaXESession -SqlInstance $Server -Session "PerformanceIssues"| Out-Null
 
@@ -128,33 +176,41 @@ $Server.BackupDirectory
 
         # TempDB autogrowth
         Invoke-DbaQuery -SqlInstance $Server -Database "master" -Query "
-            CREATE EVENT SESSION [TempDBAutogrowth] ON SERVER 
-            ADD EVENT sqlserver.database_file_size_change(
-                ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,sqlserver.session_id,sqlserver.sql_text)
-                WHERE ([database_id]=(2) AND [session_id]>(50))),
-            ADD EVENT sqlserver.databases_log_file_size_changed(
-                ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,sqlserver.session_id,sqlserver.sql_text)
-                WHERE ([database_id]=(2) AND [session_id]>(50)))
-            ADD TARGET package0.event_file(SET filename=N'TempDBAutogrowth',max_file_size=(10),max_rollover_files=(5))
-            WITH (MAX_MEMORY=4096 KB,EVENT_RETENTION_MODE=ALLOW_SINGLE_EVENT_LOSS,MAX_DISPATCH_LATENCY=30 SECONDS,MAX_EVENT_SIZE=0 KB,MEMORY_PARTITION_MODE=NONE,TRACK_CAUSALITY=ON,STARTUP_STATE=ON)
+			CREATE EVENT SESSION [TempDBAutogrowth] ON SERVER 
+			ADD EVENT sqlserver.database_file_size_change(
+				ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,
+					   sqlserver.database_name,sqlserver.session_id,sqlserver.sql_text,sqlserver.transaction_id)
+				WHERE ([database_id]=(2) AND [session_id]>(50))),
+			ADD EVENT sqlserver.databases_log_file_size_changed(
+				ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,
+					   sqlserver.database_name,sqlserver.session_id,sqlserver.sql_text,sqlserver.transaction_id)
+				WHERE ([database_id]=(2) AND [session_id]>(50))),
+			ADD EVENT sqlserver.error_reported(
+				ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.plan_handle,
+					   sqlserver.session_id,sqlserver.sql_text,sqlserver.transaction_id,sqlserver.username)
+				WHERE ([database_id]=(2) AND [session_id]>(50) AND ([error_number]=(1101) OR [error_number]=(1105))))
+			ADD TARGET package0.event_file(SET filename=N'TempDBAutogrowth',max_file_size=(10),max_rollover_files=(5))
+			WITH (MAX_MEMORY=4096 KB,EVENT_RETENTION_MODE=ALLOW_SINGLE_EVENT_LOSS,MAX_DISPATCH_LATENCY=30 SECONDS,
+				  MAX_EVENT_SIZE=0 KB,MEMORY_PARTITION_MODE=NONE,TRACK_CAUSALITY=ON,STARTUP_STATE=ON)
         " | Out-Null
-
-        Start-DbaXESession -SqlInstance $Server -Session "TempDBAutogrowth"| Out-Null
+        Start-DbaXESession -SqlInstance $Server -Session "TempDBAutogrowth" | Out-Null
 
 		# UserDB Log Autogrowth
 		Invoke-DbaQuery -SqlInstance $Server -Database "master" -Query "
             CREATE EVENT SESSION [UserDBLogAutogrowth] ON SERVER 
             ADD EVENT sqlserver.databases_log_file_size_changed(
-                ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,sqlserver.session_id,sqlserver.sql_text)
+                ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,
+					   sqlserver.database_name,sqlserver.session_id,sqlserver.sql_text,sqlserver.transaction_id)
                 WHERE ([database_id]>(4) AND [session_id]>(50)))
             ADD TARGET package0.event_file(SET filename=N'UserDBLogAutogrowth',max_file_size=(10),max_rollover_files=(5))
-            WITH (MAX_MEMORY=4096 KB,EVENT_RETENTION_MODE=ALLOW_SINGLE_EVENT_LOSS,MAX_DISPATCH_LATENCY=30 SECONDS,MAX_EVENT_SIZE=0 KB,MEMORY_PARTITION_MODE=NONE,TRACK_CAUSALITY=ON,STARTUP_STATE=ON)
-        " | Out-Null
+            WITH (MAX_MEMORY=4096 KB,EVENT_RETENTION_MODE=ALLOW_SINGLE_EVENT_LOSS,MAX_DISPATCH_LATENCY=30 SECONDS,
+				  MAX_EVENT_SIZE=0 KB,MEMORY_PARTITION_MODE=NONE,TRACK_CAUSALITY=ON,STARTUP_STATE=ON)
+		" | Out-Null
 
 		Start-DbaXESession -SqlInstance $Server -Session "UserDBLogAutogrowth"| Out-Null
 
 
-        # Audit SA login
+        # Audit SA activity
         Invoke-DbaQuery -SqlInstance $server -Database "master" -Query "
             CREATE EVENT SESSION [AuditLoginSA] ON SERVER 
             ADD EVENT sqlserver.login(
@@ -165,7 +221,7 @@ $Server.BackupDirectory
             ADD TARGET package0.event_file(SET filename=N'AuditLoginSA',max_file_size=(20))
             WITH (STARTUP_STATE=ON)
         " | Out-Null
-        Start-DbaXESession -SqlInstance $server -Session "AuditLoginSA"
+        Start-DbaXESession -SqlInstance $server -Session "AuditLoginSA"  | Out-Null
 
         # AdminFoolTracking
         Invoke-DbaQuery -SqlInstance $Server -Database "master" -Query "
@@ -179,9 +235,15 @@ $Server.BackupDirectory
         Start-DbaXESession -SqlInstance $Server -Session "AdminIssues"| Out-Null
     }
     
-    # increase SQL Agent default retention
+    
     if (!($(Get-DbaInstanceProperty -SqlInstance $Server -InstanceProperty  Edition).value -Match "Express")){
+
+        # increase SQL Agent default retention
         Set-DbaAgentServer -SqlInstance $Server -MaximumHistoryRows 999999 -MaximumJobHistoryRows 999999 | Out-Null
+
+        # add syspolicy_purge_history to Database Maintenance Category
+        Set-DbaAgentJob -SqlInstance $Server -Job "syspolicy_purge_history" -Category "Database Maintenance"  | Out-Null
+
     }
 
 #endregion
@@ -189,23 +251,27 @@ $Server.BackupDirectory
 
 # Create DBA database if needed
 if (!(Get-DbaDatabase -SqlInstance $Server -Database $dbaDatabase )){
-    New-DbaDatabase -SqlInstance $Server -Name $dbaDatabase -Owner sa -RecoveryModel Simple  | Out-Null
+    New-DbaDatabase -SqlInstance $Server -Name $dbaDatabase -Owner sa -RecoveryModel Simple | Out-Null
     Write-Host "[$dbaDatabase] database created"
 } else {
     Write-Host "[$dbaDatabase] database already exists"
 }
 
-# Install sp_whoisactive stored procedure. Thanks Adam Machanic 
-# Feedback: mailto:adam@dataeducation.com
-# Updates: http://whoisactive.com
-# Blog: http://dataeducation.com
+# Install sp_whoisactive stored procedure, by Adam Machanic 
+# GitHub : https://github.com/amachanic/sp_whoisactive
 Install-DbaWhoIsActive -SqlInstance $Server -Database $dbaDatabase | Out-Null
 
 
-#region Install Database maintenance objects
-# https://ola.hallengren.com/
+# Install sp_whoisactive stored procedure, by Brent Ozar 
+# GitHub : https://github.com/BrentOzarULTD/SQL-Server-First-Responder-Kit
+Install-DbaFirstResponderKit -SqlInstance $Server -Database $dbaDatabase | Out-Null
 
-    Install-DbaMaintenanceSolution -SqlInstance $Server.Name -Database $dbaDatabase -CleanupTime $CleanupTime -InstallJobs -LogToTable -ReplaceExisting -Force | out-null
+#region Database maintenance
+
+	# Install Maintenance Solution by Ola Hallengren https://ola.hallengren.com/
+	# GitHub : https://github.com/olahallengren/sql-server-maintenance-solution
+    Install-DbaMaintenanceSolution -SqlInstance $Server.Name -Database $dbaDatabase -CleanupTime $CleanupTime `
+                                   -InstallJobs -LogToTable -ReplaceExisting -Force | out-null
 
     $tSQL = "
         CREATE PROCEDURE dbo.sp_sp_start_job_wait
@@ -289,7 +355,8 @@ Install-DbaWhoIsActive -SqlInstance $Server -Database $dbaDatabase | Out-Null
             RETURN @JobCompletionStatus
         END
     "
-    Invoke-DbaQuery -SqlInstance $Server -Database $dbaDatabase -Query $tSQL
+    Invoke-DbaQuery -SqlInstance $Server -Database $dbaDatabase -Query $tSQL  | Out-Null
+
 #endregion
 
 #region Creating jobs for instance housekeeping
@@ -307,57 +374,58 @@ New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "Cycle Errorlo
                     -OnSuccessAction GoToNextStep `
                     -OnFailAction GoToNextStep | Out-Null
 
-New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "CommandLog Cleanup" -Force `
+New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseIntegrityCheck - SYSTEM_DATABASES" -Force `
                     -Database master -StepId 2 `
+                    -Subsystem "TransactSql" `
+                    -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='DatabaseIntegrityCheck - SYSTEM_DATABASES', @WaitTime = '00:01:00'" `
+                    -OnSuccessAction GoToNextStep `
+                    -OnFailAction GoToNextStep | Out-Null             
+                    
+New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseBackup - SYSTEM_DATABASES - FULL" -Force `
+                    -Database master -StepId 3 `
+                    -Subsystem "TransactSql" `
+                    -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='DatabaseBackup - SYSTEM_DATABASES - FULL', @WaitTime = '00:01:00'" `
+                    -OnSuccessAction QuitWithSuccess `
+                    -OnFailAction GoToNextStep | Out-Null   
+
+New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "CommandLog Cleanup" -Force `
+                    -Database master -StepId 4 `
                     -Subsystem "TransactSql" `
                     -Command "EXEC msdb.dbo.sp_start_job 'CommandLog Cleanup'" `
                     -OnSuccessAction GoToNextStep `
                     -OnFailAction GoToNextStep | Out-Null                        
     
 New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "Output File Cleanup" -Force `
-                    -Database master -StepId 3 `
+                    -Database master -StepId 5 `
                     -Subsystem "TransactSql" `
                     -Command "EXEC msdb.dbo.sp_start_job 'Output File Cleanup'" `
                     -OnSuccessAction GoToNextStep `
                     -OnFailAction GoToNextStep | Out-Null                        
 
 New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "sp_delete_backuphistory" -Force `
-                    -Database master -StepId 4 `
+                    -Database master -StepId 6 `
                     -Subsystem "TransactSql" `
-                    -Command "EXEC msdb.dbo.sp_start_job 'sp_delete_backuphistory'" `
+                    -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='sp_delete_backuphistory', @WaitTime = '00:01:00'" `
                     -OnSuccessAction GoToNextStep `
                     -OnFailAction GoToNextStep | Out-Null                        
 
 New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "sp_purge_jobhistory" -Force `
-                    -Database master -StepId 5  `
+                    -Database master -StepId 7  `
                     -Subsystem "TransactSql" `
-                    -Command "EXEC msdb.dbo.sp_start_job 'sp_purge_jobhistory'" `
+                    -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='sp_purge_jobhistory', @WaitTime = '00:01:00'" `
                     -OnSuccessAction GoToNextStep `
                     -OnFailAction GoToNextStep | Out-Null                        
 
 New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseMail - Database Mail cleanup" -Force `
-                    -Database master -StepId 6 `
-                    -Subsystem "TransactSql" `
-                    -Command "DECLARE @DeleteBeforeDate DateTime = (Select DATEADD(d,-30, GETDATE()))
-                                EXEC msdb.dbo.sysmail_delete_mailitems_sp @sent_before = @DeleteBeforeDate
-                                EXEC msdb.dbo.sysmail_delete_log_sp @logged_before = @DeleteBeforeDate" `
-                    -OnSuccessAction GoToNextStep `
-                    -OnFailAction GoToNextStep | Out-Null             
-                    
-New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseIntegrityCheck - SYSTEM_DATABASES" -Force `
-                    -Database master -StepId 7 `
-                    -Subsystem "TransactSql" `
-                    -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='DatabaseIntegrityCheck - SYSTEM_DATABASES', @WaitTime = '00:01:00'" `
-                    -OnSuccessAction GoToNextStep `
-                    -OnFailAction GoToNextStep | Out-Null             
-                    
-
-New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseBackup - SYSTEM_DATABASES - FULL" -Force `
                     -Database master -StepId 8 `
                     -Subsystem "TransactSql" `
-                    -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='DatabaseBackup - SYSTEM_DATABASES - FULL', @WaitTime = '00:01:00'" `
+                    -Command "DECLARE @DeleteBeforeDate DateTime = (Select DATEADD(d,-30, GETDATE()))
+                              EXEC msdb.dbo.sysmail_delete_mailitems_sp @sent_before = @DeleteBeforeDate
+                              EXEC msdb.dbo.sysmail_delete_log_sp @logged_before = @DeleteBeforeDate" `
                     -OnSuccessAction QuitWithSuccess `
                     -OnFailAction QuitWithFailure | Out-Null             
+                    
+          
                     
 #endregion
 
@@ -442,13 +510,31 @@ New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseBacku
                     -OnSuccessAction QuitWithSuccess `
                     -OnFailAction QuitWithFailure | Out-Null
 
+<#
+New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseBackup - SYSTEM_DATABASES - LOG" -Force `
+                    -Database master -StepId 2 `
+                    -Subsystem "TransactSql" `
+                    -Command "EXECUTE [$dbaDatabase].[dbo].[DatabaseBackup]
+                                @Databases = 'SYSTEM_DATABASES',
+                                @Directory = N'$defaultbackuplocation',
+                                @BackupType = 'LOG',
+                                @Verify = 'Y',
+                                @CleanupTime = $CleanupTime,
+                                @CheckSum = 'Y',
+                                @LogToTable = 'Y' " `
+                    -OnSuccessAction QuitWithSuccess `
+                    -OnFailAction QuitWithFailure | Out-Null                 
+#>
 
 #endregion
 
 
+<#
 
-# check jobs
-$Server | Get-DbaAgentJob -Category "Database Maintenance" | format-table -AutoSize
+    $Server  | Get-DbaAgentJob | Where-Object {$_.Category -match "Database Maintenance" } | format-table -autosize
+  
+    Start-DbaAgentJob -SqlInstance $Server -Job "DBA - HouseKeeping"
+    Start-DbaAgentJob -SqlInstance $Server -Job "DBA - USER_DATABASES - FULL"
 
-# perform system databases backup
-$Server | Get-DbaAgentJob -Job "DatabaseBackup - SYSTEM_DATABASES - FULL" | Start-DbaAgentJob | Format-Table -AutoSize
+#>
+
