@@ -3,7 +3,7 @@
 #  Summary:  SQL Server configuration using dbaTools
 #
 #  ----------------------------------------------------------------------------
-#  Written by Christophe LAPORTE, SQL Server MVP / MCM
+#  Written by Christophe LAPORTE, SQL Server MCM
 #	Blog    : http://conseilit.wordpress.com
 #	Twitter : @ConseilIT
 #  
@@ -26,17 +26,18 @@
 #
 
 
+
 Clear-Host
 $InstanceName = "SrvSQL"
 $dbaDatabase = "_DBA"
 $CleanupTime = 15 <# days #> * 24
-
+$BackupStrategy = "FullDiffLog" <# FullDiffLog | FullLog  #>
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 if ((Get-InstalledModule -Name "dbatools").version.major -ge 2) {
     # Due to changes by MS https://blog.netnerds.net/2023/03/new-defaults-for-sql-server-connections-encryption-trust-certificate/
-    Set-DbatoolsInsecureConnection -SessionOnly 
+    Set-DbatoolsInsecureConnection -SessionOnly  | Out-Null
 }
 
 # check connection to the instance
@@ -223,16 +224,49 @@ if (!($(Get-DbaInstanceProperty -SqlInstance $Server -InstanceProperty  Edition)
         " | Out-Null
         Start-DbaXESession -SqlInstance $server -Session "AuditLoginSA"  | Out-Null
 
-        # AdminFoolTracking
-        Invoke-DbaQuery -SqlInstance $Server -Database "master" -Query "
-            CREATE EVENT SESSION [AdminIssues] ON SERVER 
-            ADD EVENT sqlserver.database_dropped(
-                ACTION(sqlserver.client_app_name,sqlserver.client_hostname,sqlserver.database_id,sqlserver.database_name,sqlserver.session_id,sqlserver.sql_text,sqlserver.username))
-            ADD TARGET package0.event_file(SET filename=N'AdminIssues',max_file_size=(10),max_rollover_files=(5))
-            WITH (MAX_MEMORY=4096 KB,EVENT_RETENTION_MODE=ALLOW_SINGLE_EVENT_LOSS,MAX_DISPATCH_LATENCY=30 SECONDS,MAX_EVENT_SIZE=0 KB,MEMORY_PARTITION_MODE=NONE,TRACK_CAUSALITY=OFF,STARTUP_STATE=ON)
-        " | Out-Null
+        # DDL audit
+        $cmd = "
+            CREATE SERVER AUDIT [Audit-DDL]
+            TO FILE (	
+                FILEPATH = N'$($server.ErrorLogPath)'	
+                ,MAXSIZE = 100 MB
+                ,MAX_ROLLOVER_FILES = 10
+                ,RESERVE_DISK_SPACE = OFF
+            )
+            WITH
+            (	QUEUE_DELAY = 1000
+                ,ON_FAILURE = CONTINUE
+            ) 
+            WHERE     ([Object_Name]<>'telemetry_xevents' and [server_principal_name] not like '%SQLTELEMETRY%')
+              AND NOT (class_type = 19267 AND action_id = 8278);
 
-        Start-DbaXESession -SqlInstance $Server -Session "AdminIssues"| Out-Null
+            ALTER SERVER AUDIT [Audit-DDL] WITH (STATE = ON) 
+        "
+        Invoke-DbaQuery -SqlInstance $server -Query $cmd  | Out-Null
+
+
+        $cmd = "
+            CREATE SERVER AUDIT SPECIFICATION [AuditSpecification-DDL]
+            FOR SERVER AUDIT [Audit-DDL]
+                ADD (DATABASE_OBJECT_CHANGE_GROUP),            
+                ADD (DATABASE_OBJECT_OWNERSHIP_CHANGE_GROUP),  
+                ADD (DATABASE_OBJECT_PERMISSION_CHANGE_GROUP), 
+                ADD (DATABASE_OWNERSHIP_CHANGE_GROUP),         
+                ADD (DATABASE_PERMISSION_CHANGE_GROUP),        
+                ADD (DATABASE_PRINCIPAL_CHANGE_GROUP),         
+                ADD (DATABASE_ROLE_MEMBER_CHANGE_GROUP),       
+                ADD (LOGIN_CHANGE_PASSWORD_GROUP),             
+                ADD (SERVER_OBJECT_CHANGE_GROUP),              
+                ADD (SERVER_OBJECT_OWNERSHIP_CHANGE_GROUP),    
+                ADD (SERVER_OBJECT_PERMISSION_CHANGE_GROUP),   
+                ADD (SERVER_PERMISSION_CHANGE_GROUP),          
+                ADD (SERVER_PRINCIPAL_CHANGE_GROUP),           
+                ADD (SERVER_ROLE_MEMBER_CHANGE_GROUP)          
+            WITH (STATE=ON)
+        "
+        Invoke-DbaQuery -SqlInstance $server -Query $cmd | Out-Null
+
+
     }
     
     
@@ -360,155 +394,167 @@ Install-DbaFirstResponderKit -SqlInstance $Server -Database $dbaDatabase | Out-N
 #endregion
 
 #region Creating jobs for instance housekeeping
-$job = New-DbaAgentJob -SqlInstance $Server -Job '_DBA - HouseKeeping' -Category "Database Maintenance" -OwnerLogin sa
+    $job = New-DbaAgentJob -SqlInstance $Server -Job '_DBA - HouseKeeping' -Category "Database Maintenance" -OwnerLogin sa
 
-New-DbaAgentSchedule -SqlInstance $Server -Schedule $job.name -Job $job.name `
-                     -FrequencyType Daily -FrequencyInterval Everyday `
-                     -FrequencySubdayType Time -FrequencySubDayinterval 0 `
-                     -StartTime "000001" -EndTime "235959" -Force | Out-Null
+    New-DbaAgentSchedule -SqlInstance $Server -Schedule $job.name -Job $job.name `
+                        -FrequencyType Daily -FrequencyInterval Everyday `
+                        -FrequencySubdayType Time -FrequencySubDayinterval 0 `
+                        -StartTime "000001" -EndTime "235959" -Force | Out-Null
 
-New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "Cycle Errorlog" -Force `
-                    -Database master -StepId 1 `
-                    -Subsystem "TransactSql" `
-                    -Command "EXEC msdb.dbo.sp_cycle_errorlog" `
-                    -OnSuccessAction GoToNextStep `
-                    -OnFailAction GoToNextStep | Out-Null
+    New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "Cycle Errorlog" -Force `
+                        -Database master -StepId 1 `
+                        -Subsystem "TransactSql" `
+                        -Command "EXEC msdb.dbo.sp_cycle_errorlog" `
+                        -OnSuccessAction GoToNextStep `
+                        -OnFailAction GoToNextStep | Out-Null
 
-New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseIntegrityCheck - SYSTEM_DATABASES" -Force `
-                    -Database master -StepId 2 `
-                    -Subsystem "TransactSql" `
-                    -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='DatabaseIntegrityCheck - SYSTEM_DATABASES', @WaitTime = '00:01:00'" `
-                    -OnSuccessAction GoToNextStep `
-                    -OnFailAction GoToNextStep | Out-Null             
-                    
-New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseBackup - SYSTEM_DATABASES - FULL" -Force `
-                    -Database master -StepId 3 `
-                    -Subsystem "TransactSql" `
-                    -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='DatabaseBackup - SYSTEM_DATABASES - FULL', @WaitTime = '00:01:00'" `
-                    -OnSuccessAction QuitWithSuccess `
-                    -OnFailAction GoToNextStep | Out-Null   
+    New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseIntegrityCheck - SYSTEM_DATABASES" -Force `
+                        -Database master -StepId 2 `
+                        -Subsystem "TransactSql" `
+                        -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='DatabaseIntegrityCheck - SYSTEM_DATABASES', @WaitTime = '00:01:00'" `
+                        -OnSuccessAction GoToNextStep `
+                        -OnFailAction GoToNextStep | Out-Null             
+                        
+    New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseBackup - SYSTEM_DATABASES - FULL" -Force `
+                        -Database master -StepId 3 `
+                        -Subsystem "TransactSql" `
+                        -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='DatabaseBackup - SYSTEM_DATABASES - FULL', @WaitTime = '00:01:00'" `
+                        -OnSuccessAction QuitWithSuccess `
+                        -OnFailAction GoToNextStep | Out-Null   
 
-New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "CommandLog Cleanup" -Force `
-                    -Database master -StepId 4 `
-                    -Subsystem "TransactSql" `
-                    -Command "EXEC msdb.dbo.sp_start_job 'CommandLog Cleanup'" `
-                    -OnSuccessAction GoToNextStep `
-                    -OnFailAction GoToNextStep | Out-Null                        
-    
-New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "Output File Cleanup" -Force `
-                    -Database master -StepId 5 `
-                    -Subsystem "TransactSql" `
-                    -Command "EXEC msdb.dbo.sp_start_job 'Output File Cleanup'" `
-                    -OnSuccessAction GoToNextStep `
-                    -OnFailAction GoToNextStep | Out-Null                        
+    New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "CommandLog Cleanup" -Force `
+                        -Database master -StepId 4 `
+                        -Subsystem "TransactSql" `
+                        -Command "EXEC msdb.dbo.sp_start_job 'CommandLog Cleanup'" `
+                        -OnSuccessAction GoToNextStep `
+                        -OnFailAction GoToNextStep | Out-Null                        
+        
+    New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "Output File Cleanup" -Force `
+                        -Database master -StepId 5 `
+                        -Subsystem "TransactSql" `
+                        -Command "EXEC msdb.dbo.sp_start_job 'Output File Cleanup'" `
+                        -OnSuccessAction GoToNextStep `
+                        -OnFailAction GoToNextStep | Out-Null                        
 
-New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "sp_delete_backuphistory" -Force `
-                    -Database master -StepId 6 `
-                    -Subsystem "TransactSql" `
-                    -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='sp_delete_backuphistory', @WaitTime = '00:01:00'" `
-                    -OnSuccessAction GoToNextStep `
-                    -OnFailAction GoToNextStep | Out-Null                        
+    New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "sp_delete_backuphistory" -Force `
+                        -Database master -StepId 6 `
+                        -Subsystem "TransactSql" `
+                        -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='sp_delete_backuphistory', @WaitTime = '00:01:00'" `
+                        -OnSuccessAction GoToNextStep `
+                        -OnFailAction GoToNextStep | Out-Null                        
 
-New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "sp_purge_jobhistory" -Force `
-                    -Database master -StepId 7  `
-                    -Subsystem "TransactSql" `
-                    -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='sp_purge_jobhistory', @WaitTime = '00:01:00'" `
-                    -OnSuccessAction GoToNextStep `
-                    -OnFailAction GoToNextStep | Out-Null                        
+    New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "sp_purge_jobhistory" -Force `
+                        -Database master -StepId 7  `
+                        -Subsystem "TransactSql" `
+                        -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='sp_purge_jobhistory', @WaitTime = '00:01:00'" `
+                        -OnSuccessAction GoToNextStep `
+                        -OnFailAction GoToNextStep | Out-Null                        
 
-New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseMail - Database Mail cleanup" -Force `
-                    -Database master -StepId 8 `
-                    -Subsystem "TransactSql" `
-                    -Command "DECLARE @DeleteBeforeDate DateTime = (Select DATEADD(d,-30, GETDATE()))
-                              EXEC msdb.dbo.sysmail_delete_mailitems_sp @sent_before = @DeleteBeforeDate
-                              EXEC msdb.dbo.sysmail_delete_log_sp @logged_before = @DeleteBeforeDate" `
-                    -OnSuccessAction QuitWithSuccess `
-                    -OnFailAction QuitWithFailure | Out-Null             
-                    
-          
-                    
+    New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseMail - Database Mail cleanup" -Force `
+                        -Database master -StepId 8 `
+                        -Subsystem "TransactSql" `
+                        -Command "DECLARE @DeleteBeforeDate DateTime = (Select DATEADD(d,-30, GETDATE()))
+                                EXEC msdb.dbo.sysmail_delete_mailitems_sp @sent_before = @DeleteBeforeDate
+                                EXEC msdb.dbo.sysmail_delete_log_sp @logged_before = @DeleteBeforeDate" `
+                        -OnSuccessAction QuitWithSuccess `
+                        -OnFailAction QuitWithFailure | Out-Null             
+                        
+            
+                        
 #endregion
 
 
 #region Database backup
-$job = New-DbaAgentJob -SqlInstance $Server -Job '_DBA - USER_DATABASES - FULL' -Category "Database Maintenance" -OwnerLogin sa
+    $job = New-DbaAgentJob -SqlInstance $Server -Job '_DBA - USER_DATABASES - FULL' -Category "Database Maintenance" -OwnerLogin sa
 
-New-DbaAgentSchedule -SqlInstance $Server -Schedule $job.name -Job $job.name `
-                    -FrequencyType Weekly -FrequencyInterval Sunday `
-                    -FrequencySubdayType Time -FrequencySubDayinterval 0 -FrequencyRecurrenceFactor 1 `
-                    -StartTime "010000" -EndTime "235959" -Force | Out-Null
+    if ($BackupStrategy -eq "FullDiffLog") {
+        New-DbaAgentSchedule -SqlInstance $Server -Schedule $job.name -Job $job.name `
+                            -FrequencyType Weekly -FrequencyInterval Sunday `
+                            -FrequencySubdayType Time -FrequencySubDayinterval 0 -FrequencyRecurrenceFactor 1 `
+                            -StartTime "010000" -EndTime "235959" -Force | Out-Null
+    } else {
+        New-DbaAgentSchedule -SqlInstance $Server -Schedule $job.name -Job $job.name `
+                            -FrequencyType Daily -FrequencyInterval EveryDay `
+                            -FrequencySubdayType Time -FrequencySubDayinterval 0 -FrequencyRecurrenceFactor 1 `
+                            -StartTime "010000" -EndTime "235959" -Force | Out-Null
+    }
 
-New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseIntegrityCheck - USER_DATABASES" -Force `
-                    -Database master -StepId 1 `
-                    -Subsystem "TransactSql" `
-                    -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='DatabaseIntegrityCheck - USER_DATABASES', @WaitTime = '00:01:00'" `
-                    -OnSuccessAction GoToNextStep `
-                    -OnFailAction GoToNextStep | Out-Null
 
-New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "IndexOptimize - USER_DATABASES" -Force `
-                    -Database master -StepId 2 `
-                    -Subsystem "TransactSql" `
-                    -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='IndexOptimize - USER_DATABASES', @WaitTime = '00:01:00'" `
-                    -OnSuccessAction GoToNextStep `
-                    -OnFailAction GoToNextStep | Out-Null                        
-    
-New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseBackup - USER_DATABASES - FULL" -Force `
-                    -Database master -StepId 3 `
-                    -Subsystem "TransactSql" `
-                    -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='DatabaseBackup - USER_DATABASES - FULL', @WaitTime = '00:01:00'" `
-                    -OnSuccessAction QuitWithSuccess `
-                    -OnFailAction QuitWithFailure | Out-Null                        
-                        
+    New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseIntegrityCheck - USER_DATABASES" -Force `
+                        -Database master -StepId 1 `
+                        -Subsystem "TransactSql" `
+                        -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='DatabaseIntegrityCheck - USER_DATABASES', @WaitTime = '00:01:00'" `
+                        -OnSuccessAction GoToNextStep `
+                        -OnFailAction GoToNextStep | Out-Null
+
+    New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "IndexOptimize - USER_DATABASES" -Force `
+                        -Database master -StepId 2 `
+                        -Subsystem "TransactSql" `
+                        -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='IndexOptimize - USER_DATABASES', @WaitTime = '00:01:00'" `
+                        -OnSuccessAction GoToNextStep `
+                        -OnFailAction GoToNextStep | Out-Null                        
+        
+    New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseBackup - USER_DATABASES - FULL" -Force `
+                        -Database master -StepId 3 `
+                        -Subsystem "TransactSql" `
+                        -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='DatabaseBackup - USER_DATABASES - FULL', @WaitTime = '00:01:00'" `
+                        -OnSuccessAction QuitWithSuccess `
+                        -OnFailAction QuitWithFailure | Out-Null                        
+                            
 #endregion
 
 #region Diff backup
-$job = New-DbaAgentJob -SqlInstance $Server -Job '_DBA - USER_DATABASES - DIFF' -Category "Database Maintenance" -OwnerLogin sa
+    $job = New-DbaAgentJob -SqlInstance $Server -Job '_DBA - USER_DATABASES - DIFF' -Category "Database Maintenance" -OwnerLogin sa
 
-New-DbaAgentSchedule -SqlInstance $Server -Schedule $job.name -Job $job.name `
-                    -FrequencyType Weekly -FrequencyInterval Monday,Tuesday,Wednesday,Thursday,Friday,Saturday `
-                    -FrequencySubdayType Time -FrequencySubDayinterval 0 -FrequencyRecurrenceFactor 1 `
-                    -StartTime "010000" -EndTime "235959" -Force | Out-Null
+    if ($BackupStrategy -eq "FullLog") {
+        $job | Set-DbaAgentJob -Disabled
+    }
 
-New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseIntegrityCheck - USER_DATABASES" -Force `
-                    -Database master -StepId 1 `
-                    -Subsystem "TransactSql" `
-                    -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='DatabaseIntegrityCheck - USER_DATABASES', @WaitTime = '00:01:00'" `
-                    -OnSuccessAction GoToNextStep `
-                    -OnFailAction GoToNextStep | Out-Null
+    New-DbaAgentSchedule -SqlInstance $Server -Schedule $job.name -Job $job.name `
+                        -FrequencyType Weekly -FrequencyInterval Monday,Tuesday,Wednesday,Thursday,Friday,Saturday `
+                        -FrequencySubdayType Time -FrequencySubDayinterval 0 -FrequencyRecurrenceFactor 1 `
+                        -StartTime "010000" -EndTime "235959" -Force | Out-Null
 
-New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "IndexOptimize - USER_DATABASES" -Force `
-                    -Database master -StepId 2 `
-                    -Subsystem "TransactSql" `
-                    -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='IndexOptimize - USER_DATABASES', @WaitTime = '00:01:00'" `
-                    -OnSuccessAction GoToNextStep `
-                    -OnFailAction GoToNextStep | Out-Null                        
-    
-New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseBackup - USER_DATABASES - DIFF" -Force `
-                    -Database master -StepId 3 `
-                    -Subsystem "TransactSql" `
-                    -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='DatabaseBackup - USER_DATABASES - DIFF', @WaitTime = '00:01:00'" `
-                    -OnSuccessAction QuitWithSuccess `
-                    -OnFailAction QuitWithFailure | Out-Null                       
+    New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseIntegrityCheck - USER_DATABASES" -Force `
+                        -Database master -StepId 1 `
+                        -Subsystem "TransactSql" `
+                        -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='DatabaseIntegrityCheck - USER_DATABASES', @WaitTime = '00:01:00'" `
+                        -OnSuccessAction GoToNextStep `
+                        -OnFailAction GoToNextStep | Out-Null
 
-                        
+    New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "IndexOptimize - USER_DATABASES" -Force `
+                        -Database master -StepId 2 `
+                        -Subsystem "TransactSql" `
+                        -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='IndexOptimize - USER_DATABASES', @WaitTime = '00:01:00'" `
+                        -OnSuccessAction GoToNextStep `
+                        -OnFailAction GoToNextStep | Out-Null                        
+        
+    New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseBackup - USER_DATABASES - DIFF" -Force `
+                        -Database master -StepId 3 `
+                        -Subsystem "TransactSql" `
+                        -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='DatabaseBackup - USER_DATABASES - DIFF', @WaitTime = '00:01:00'" `
+                        -OnSuccessAction QuitWithSuccess `
+                        -OnFailAction QuitWithFailure | Out-Null                       
+
+                            
 
 #endregion
 
 #region Log backup
-$job = New-DbaAgentJob -SqlInstance $Server -Job '_DBA - USER_DATABASES - LOG' -Category "Database Maintenance" -OwnerLogin sa 
-                        
-New-DbaAgentSchedule -SqlInstance $Server -Schedule $job.name -Job $job.name `
-                     -FrequencyType Daily -FrequencyInterval EveryDay `
-                     -FrequencySubdayType Minutes -FrequencySubDayinterval 30 `
-                     -StartTime "001500" -EndTime "235959" -Force | Out-Null
+    $job = New-DbaAgentJob -SqlInstance $Server -Job '_DBA - USER_DATABASES - LOG' -Category "Database Maintenance" -OwnerLogin sa 
+                            
+    New-DbaAgentSchedule -SqlInstance $Server -Schedule $job.name -Job $job.name `
+                        -FrequencyType Daily -FrequencyInterval EveryDay `
+                        -FrequencySubdayType Minutes -FrequencySubDayinterval 30 `
+                        -StartTime "001500" -EndTime "235959" -Force | Out-Null
 
-                     
-New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseBackup - USER_DATABASES - LOG" -Force `
-                    -Database master -StepId 1 `
-                    -Subsystem "TransactSql" `
-                    -Command "EXEC msdb.dbo.sp_start_job 'DatabaseBackup - USER_DATABASES - LOG'" `
-                    -OnSuccessAction QuitWithSuccess `
-                    -OnFailAction QuitWithFailure | Out-Null
+                        
+    New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseBackup - USER_DATABASES - LOG" -Force `
+                        -Database master -StepId 1 `
+                        -Subsystem "TransactSql" `
+                        -Command "EXEC msdb.dbo.sp_start_job 'DatabaseBackup - USER_DATABASES - LOG'" `
+                        -OnSuccessAction QuitWithSuccess `
+                        -OnFailAction QuitWithFailure | Out-Null
 
 <#
 New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseBackup - SYSTEM_DATABASES - LOG" -Force `
@@ -528,11 +574,34 @@ New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseBacku
 
 #endregion
 
+#region Final checks
+
+    Test-DbaNetworkLatency -SqlInstance $server -Count 10 -Query "select @@servername,@@version" | Format-List 
+
+    $MaintenanceJobs = Get-DbaAgentJob -SqlInstance $server -Category "Database Maintenance"
+    $AgentSchedules = Get-DbaAgentSchedule -SqlInstance $server
+
+    $JoinedData = @()
+    foreach ($MaintenanceJob in $MaintenanceJobs) {
+        $AgentSchedule = $AgentSchedules | Where-Object {$_.ScheduleName -eq $MaintenanceJob.JobSchedules[0]}
+        $obj = New-Object -TypeName PSObject -Property @{
+            JobName = $MaintenanceJob.Name
+            JobCategory = $MaintenanceJob.Category
+            NextRunDate = $MaintenanceJob.NextRunDate
+            ScheduleName = $AgentSchedule.ScheduleName
+            FrequencyTypes = $AgentSchedule.FrequencyTypes
+            Description = $AgentSchedule.Description
+        }
+        $JoinedData += $obj
+    }
+    $JoinedData | Select-object JobName,NextRunDate,Description | Format-Table -AutoSize
+
+    "ConnectionString : " + $($Server | New-DbaConnectionString)
+
+#endregion
 
 <#
 
-    $Server  | Get-DbaAgentJob | Where-Object {$_.Category -match "Database Maintenance" } | format-table -autosize
-  
     Start-DbaAgentJob -SqlInstance $Server -Job "DBA - HouseKeeping"
     Start-DbaAgentJob -SqlInstance $Server -Job "DBA - USER_DATABASES - FULL"
 
