@@ -419,7 +419,7 @@ Install-DbaFirstResponderKit -SqlInstance $Server -Database $dbaDatabase | Out-N
                         -Database master -StepId 3 `
                         -Subsystem "TransactSql" `
                         -Command "EXEC [$dbaDatabase].[dbo].sp_sp_start_job_wait @job_name='DatabaseBackup - SYSTEM_DATABASES - FULL', @WaitTime = '00:01:00'" `
-                        -OnSuccessAction QuitWithSuccess `
+                        -OnSuccessAction GoToNextStep `
                         -OnFailAction GoToNextStep | Out-Null   
 
     New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "CommandLog Cleanup" -Force `
