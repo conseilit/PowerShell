@@ -3,7 +3,7 @@
 #  Summary:  SQL Server configuration using dbaTools
 #
 #  ----------------------------------------------------------------------------
-#  Written by Christophe LAPORTE, SQL Server MCM
+#  Written by Christophe LAPORTE
 #	Blog    : http://conseilit.wordpress.com
 #	Twitter : @ConseilIT
 #  
@@ -22,32 +22,64 @@
 #          , Rob Sewell (@SQLDBAWithBeard | https://sqldbawithabeard.com/)
 #          , and all SQL Server community
 # http://dbatools.io
-# Install-Module dbatools 
+# Install-Module dbatools  -Scope CurrentUser
 #
 
 
-
 Clear-Host
-$InstanceName = "SrvSQL"
-$dbaDatabase = "_DBA"
-$CleanupTime = 15 <# days #> * 24
-$BackupStrategy = "FullDiffLog" <# FullDiffLog | FullLog  #>
+$InstanceName             = "SQLBAG1"
+$dbaDatabase              = "_DBA"
+$BackupCleanupTime        = 15 <# days #> * 24
+
+$BackupStrategy           = "FullDiffLog" <# FullDiffLog | FullLog  #>
+$TimeLimit                = 7200          <# Time limit in seconds for Index & Stats management #>
+$IncludeMonitoring        = $true         <# Add tables & jobs to monitor SQL Server activity : CPU, TempDB Usage, LogReuseWaitDescription #>
+$MonitoringCleanupTime    = 90            <# Days #>
+$MonitoringInterval       = 5             <# Minutes #>
+$AdjustMaxMemory          = $true         <# Adjust Max Memory Setting #>
+
+
+
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+function Log($out) { 
+    $out=[System.DateTime]::Now.ToString("yyyy.MM.dd-hh:mm:ss") + " ---- " + $out; 
+    Write-Output "$out" 
+} 
+
+Log "Begin"
+
+$dbaToolsModule = Get-Module -ListAvailable -Name dbatools
+if ($dbaToolsModule) {
+    Log "dbaTools module version $($dbaToolsModule.Version) installed"
+} 
+else {
+    Log "Module dbatools missing"
+    Log "Please run the following command"
+    Log "Install-Module dbatools  -Scope CurrentUser"
+    return
+}
+
 
 if ((Get-InstalledModule -Name "dbatools").version.major -ge 2) {
     # Due to changes by MS https://blog.netnerds.net/2023/03/new-defaults-for-sql-server-connections-encryption-trust-certificate/
     Set-DbatoolsInsecureConnection -SessionOnly  | Out-Null
 }
 
+
+
 # check connection to the instance
-$Server = Connect-DbaInstance -SqlInstance $InstanceName
-#$cred = Get-Credential
-#$Server = Connect-DbaInstance -SqlInstance $InstanceName -SqlCredential $cred
-#$Server | Select-Object DomainInstanceName,VersionMajor,DatabaseEngineEdition
-$Server | Select-Object DomainInstanceName,VersionMajor,DatabaseEngineEdition,Edition,ServiceAccount
-#$defaultbackuplocation = (Get-DbaDefaultPath -SqlInstance $Server).Backup
-#$defaultbackuplocation = "" # Put some folder here to not use default backup directory
+try {
+    Log "Connecting $InstanceName"
+    $Server = Connect-DbaInstance -SqlInstance $InstanceName
+    #$cred = Get-Credential
+    #$Server = Connect-DbaInstance -SqlInstance $InstanceName -SqlCredential $cred
+    $Server | Select-Object DomainInstanceName,VersionMajor,DatabaseEngineEdition,Edition,ServiceAccount
+} catch {
+    Log "Error connecting $InstanceName"
+    return
+}
 
 <#
 # Check if SQL Agent is stopped / manual
@@ -60,11 +92,20 @@ if (!($(Get-DbaInstanceProperty -SqlInstance $Server -InstanceProperty  Edition)
 
 
 #region alter default backup folder
+#$Server.BackupDirectory
     <#
+    
     $Server.BackupDirectory = "\\xxxxxxxx\yyyyy"
     $Server.alter()
-    $Server = Connect-DbaInstance -SqlInstance $InstanceName
+
+    if ($Server.ConnectionContext -match "User ID") {
+        $Server = Connect-DbaInstance -SqlInstance $InstanceName -SqlCredential $cred
+    } else {
+        $Server = Connect-DbaInstance -SqlInstance $InstanceName
+    }
+    
     $Server  | Select-Object DomainInstanceName,VersionMajor,DatabaseEngineEdition
+    Log "Backup folder updated to $($Server.BackupDirectory) "
     #>
 #endregion
 
@@ -85,17 +126,31 @@ if (!($(Get-DbaInstanceProperty -SqlInstance $Server -InstanceProperty  Edition)
 
 #region SQL Server properties configuration
 
-    Set-DbaErrorLogConfig -SqlInstance $Server -LogCount 99 | Out-Null
-    Set-DbaSpConfigure -SqlInstance $Server -name ShowAdvancedOptions -Value 1 | Out-Null
-    Set-DbaSpConfigure -SqlInstance $Server -name RemoteDacConnectionsEnabled -value 1 | Out-Null
-    Set-DbaSpConfigure -SqlInstance $Server -name OptimizeAdhocWorkloads -value 1 | Out-Null
-    Set-DbaSpConfigure -SqlInstance $Server -name CostThresholdForParallelism -value 25 | Out-Null
-    Set-DbaSpConfigure -SqlInstance $Server -name DefaultBackupCompression -value 1 | Out-Null
-    Set-DbaSpConfigure -SqlInstance $Server -name BlockedProcessThreshold -value 1 | Out-Null
-    Set-DbaSpConfigure -SqlInstance $Server -name ContainmentEnabled -value 1 | Out-Null
+    Log "Updating SQL Server configuration"
+    Set-DbaErrorLogConfig -SqlInstance $Server -LogCount 99                             | Out-Null
+    Set-DbaSpConfigure -SqlInstance $Server -name ShowAdvancedOptions         -Value 1  | Out-Null
+    Set-DbaSpConfigure -SqlInstance $Server -name RemoteDacConnectionsEnabled -value 1  | Out-Null
+    Set-DbaSpConfigure -SqlInstance $Server -name OptimizeAdhocWorkloads      -value 1  | Out-Null
+    Set-DbaSpConfigure -SqlInstance $Server -name CostThresholdForParallelism -value 35 | Out-Null
+    Set-DbaSpConfigure -SqlInstance $Server -name DefaultBackupCompression    -value 1  | Out-Null
+    Set-DbaSpConfigure -SqlInstance $Server -name BlockedProcessThreshold     -value 1  | Out-Null
+    Set-DbaSpConfigure -SqlInstance $Server -name ContainmentEnabled          -value 1  | Out-Null
 
-    # Adjust memory
-    #Set-DbaMaxMemory -SqlInstance $Server | Out-Null
+    # Adjust memory setting ?
+    if ($AdjustMaxMemory) {
+        Log "Checking Max Server memory"
+        $DbaMaxMemory = Test-DbaMaxMemory -SqlInstance $Server
+        if ($DbaMaxMemory.MaxValue -gt $DbaMaxMemory.Total) {
+            Log "Max SQL memory set to higher than the total memory"
+            Log "Ajusting Max Memory Setting according Jonathan Kehayias's recommendation"
+            Log " https://www.sqlskills.com/blogs/jonathan/wow-an-online-calculator-to-misconfigure-your-sql-server-memory/ "
+            $DbaMaxMemory
+            Set-DbaMaxMemory -SqlInstance $Server | Out-Null
+        } else {
+            Log "Max Server memory might have been set during setup : MaxValue $($DbaMaxMemory.MaxValue) MB | Total $($DbaMaxMemory.Total) MB"
+            Log ""
+        }
+    }
     
     if ($(Get-DbaInstanceProperty -SqlInstance $Server -InstanceProperty  versionMajor).value -le 14) {
 
@@ -169,11 +224,13 @@ if (!($(Get-DbaInstanceProperty -SqlInstance $Server -InstanceProperty  Edition)
         " | Out-Null
         Start-DbaXESession -SqlInstance $Server -Session "PerformanceIssues"| Out-Null
 
+        <#
         # maybe remove the event from system_health
         Invoke-DbaQuery -SqlInstance $Server -Database "master" -Query "
             ALTER EVENT SESSION [system_health] ON SERVER
             DROP EVENT sqlserver.xml_deadlock_report;
         " | Out-Null
+        #>
 
         # TempDB autogrowth
         Invoke-DbaQuery -SqlInstance $Server -Database "master" -Query "
@@ -272,6 +329,7 @@ if (!($(Get-DbaInstanceProperty -SqlInstance $Server -InstanceProperty  Edition)
     
     if (!($(Get-DbaInstanceProperty -SqlInstance $Server -InstanceProperty  Edition).value -Match "Express")){
 
+        Log "Updating SQL Server Agent configuration"
         # increase SQL Agent default retention
         Set-DbaAgentServer -SqlInstance $Server -MaximumHistoryRows 999999 -MaximumJobHistoryRows 999999 | Out-Null
 
@@ -286,25 +344,35 @@ if (!($(Get-DbaInstanceProperty -SqlInstance $Server -InstanceProperty  Edition)
 # Create DBA database if needed
 if (!(Get-DbaDatabase -SqlInstance $Server -Database $dbaDatabase )){
     New-DbaDatabase -SqlInstance $Server -Name $dbaDatabase -Owner sa -RecoveryModel Simple | Out-Null
-    Write-Host "[$dbaDatabase] database created"
+    Log "[$dbaDatabase] database created"
 } else {
-    Write-Host "[$dbaDatabase] database already exists"
+    Log "[$dbaDatabase] database already exists"
 }
 
-# Install sp_whoisactive stored procedure, by Adam Machanic 
-# GitHub : https://github.com/amachanic/sp_whoisactive
-Install-DbaWhoIsActive -SqlInstance $Server -Database $dbaDatabase | Out-Null
+#region SQL Server community rocks !!!
+
+    # Install sp_whoisactive stored procedure, by Adam Machanic 
+    # GitHub : https://github.com/amachanic/sp_whoisactive
+    # -LocalFile "c:\temp\who_is_active_v12_00.sql"
+    Install-DbaWhoIsActive -SqlInstance $Server -Database $dbaDatabase | Out-Null
 
 
-# Install sp_whoisactive stored procedure, by Brent Ozar 
-# GitHub : https://github.com/BrentOzarULTD/SQL-Server-First-Responder-Kit
-Install-DbaFirstResponderKit -SqlInstance $Server -Database $dbaDatabase | Out-Null
+    # Install sp_whoisactive stored procedure, by Brent Ozar 
+    # GitHub : https://github.com/BrentOzarULTD/SQL-Server-First-Responder-Kit
+    # -LocalFile "c:\temp\Install-All-Scripts.sql"
+    Install-DbaFirstResponderKit -SqlInstance $Server -Database $dbaDatabase | Out-Null
 
-#region Database maintenance
+#endregion
+
+
+#region Database maintenance setup
+
+    Log "Log Deploying Ola Hallengren maintenance solution ( https://ola.hallengren.com/ )"
 
 	# Install Maintenance Solution by Ola Hallengren https://ola.hallengren.com/
 	# GitHub : https://github.com/olahallengren/sql-server-maintenance-solution
-    Install-DbaMaintenanceSolution -SqlInstance $Server.Name -Database $dbaDatabase -CleanupTime $CleanupTime `
+	# -LocalFile "c:\temp\sql-server-maintenance-solution-master.zip"
+    Install-DbaMaintenanceSolution -SqlInstance $Server -Database $dbaDatabase -CleanupTime $BackupCleanupTime `
                                    -InstallJobs -LogToTable -ReplaceExisting -Force | out-null
 
     $tSQL = "
@@ -391,9 +459,33 @@ Install-DbaFirstResponderKit -SqlInstance $Server -Database $dbaDatabase | Out-N
     "
     Invoke-DbaQuery -SqlInstance $Server -Database $dbaDatabase -Query $tSQL  | Out-Null
 
+    Log "Updating IndexOptimize default parameters"
+    try {
+        $tSQL = Get-DbaDbStoredProcedure -SqlInstance $server -Database $dbaDatabase -Name "IndexOptimize" | Export-DbaScript -Passthru 
+        $tSQL = $tSQL.Replace("CREATE PROCEDURE", "ALTER PROCEDURE")
+        $tSQL = $tSQL.Replace("@OnlyModifiedStatistics nvarchar(max) = 'N'", "@OnlyModifiedStatistics nvarchar(max) = 'Y'")
+        $tSQL = $tSQL.Replace("@UpdateStatistics nvarchar(max) = NULL", "@UpdateStatistics nvarchar(max) = 'ALL'")
+        $tSQL = $tSQL.Replace("@StatisticsSample int = NULL", "@StatisticsSample int = 100")
+        $tSQL = $tSQL.Replace("@LockTimeout int = NULL", "@LockTimeout int = 1")
+        $tSQL = $tSQL.Replace("@LockMessageSeverity int = 16", "@LockMessageSeverity int = 10")
+        $tSQL = $tSQL.Replace("@TimeLimit int = NULL", "@TimeLimit int = $TimeLimit")
+        $tSQL = $tSQL.Replace("@LogToTable nvarchar(max) = 'N'", "@LogToTable nvarchar(max) = 'Y'")
+
+        #$tSQL = $tSQL.Replace("@FragmentationMedium nvarchar(max) = 'INDEX_REORGANIZE,INDEX_REBUILD_ONLINE,INDEX_REBUILD_OFFLINE'", "@FragmentationMedium nvarchar(max) = NULL")
+        #$tSQL = $tSQL.Replace("@FragmentationLevel2 int = 30", "@FragmentationLevel2 int = 50")
+        
+        Invoke-DbaQuery -SqlInstance $server -Database $dbaDatabase -Query $(-join $tSQL) 
+    } catch {
+        Log "Updating IndexOptimize procedure failed !!"
+    }
+
 #endregion
 
-#region Creating jobs for instance housekeeping
+
+
+#region Housekeeping
+
+    Log "Scheduling Housekeeping job"
     $job = New-DbaAgentJob -SqlInstance $Server -Job '_DBA - HouseKeeping' -Category "Database Maintenance" -OwnerLogin sa
 
     New-DbaAgentSchedule -SqlInstance $Server -Schedule $job.name -Job $job.name `
@@ -465,6 +557,7 @@ Install-DbaFirstResponderKit -SqlInstance $Server -Database $dbaDatabase | Out-N
 
 
 #region Database backup
+    Log "Scheduling 'USER_DATABASES - FULL' job"
     $job = New-DbaAgentJob -SqlInstance $Server -Job '_DBA - USER_DATABASES - FULL' -Category "Database Maintenance" -OwnerLogin sa
 
     if ($BackupStrategy -eq "FullDiffLog") {
@@ -504,6 +597,7 @@ Install-DbaFirstResponderKit -SqlInstance $Server -Database $dbaDatabase | Out-N
 #endregion
 
 #region Diff backup
+    Log "Scheduling 'USER_DATABASES - DIFF' job"
     $job = New-DbaAgentJob -SqlInstance $Server -Job '_DBA - USER_DATABASES - DIFF' -Category "Database Maintenance" -OwnerLogin sa
 
     if ($BackupStrategy -eq "FullLog") {
@@ -536,11 +630,10 @@ Install-DbaFirstResponderKit -SqlInstance $Server -Database $dbaDatabase | Out-N
                         -OnSuccessAction QuitWithSuccess `
                         -OnFailAction QuitWithFailure | Out-Null                       
 
-                            
-
 #endregion
 
 #region Log backup
+    Log "Scheduling 'USER_DATABASES - LOG' job"
     $job = New-DbaAgentJob -SqlInstance $Server -Job '_DBA - USER_DATABASES - LOG' -Category "Database Maintenance" -OwnerLogin sa 
                             
     New-DbaAgentSchedule -SqlInstance $Server -Schedule $job.name -Job $job.name `
@@ -565,7 +658,7 @@ New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseBacku
                                 @Directory = N'$defaultbackuplocation',
                                 @BackupType = 'LOG',
                                 @Verify = 'Y',
-                                @CleanupTime = $CleanupTime,
+                                @CleanupTime = $BackupCleanupTime,
                                 @CheckSum = 'Y',
                                 @LogToTable = 'Y' " `
                     -OnSuccessAction QuitWithSuccess `
@@ -574,12 +667,106 @@ New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseBacku
 
 #endregion
 
+
+
+#region Monitoring SQL Server
+    if ($IncludeMonitoring) {
+
+        Log "Adding basic instance monitoring"
+        $tSQL = "
+            CREATE TABLE [dbo].[TlogUsage](
+                [CollectTime] [datetime] NOT NULL,
+                [Instance] [nvarchar](128) NULL,
+                [Database Name] [sysname] NOT NULL,
+                [Recovery Model] [nvarchar](60) NULL,
+                [LogReuseWaitDescription] [nvarchar](60) NULL,
+                [LogSize(MB)] [decimal](18, 2) NULL,
+                [LogUsed(MB)] [decimal](18, 2) NULL,
+                [LogUsed%] [decimal](22, 2) NULL,
+                INDEX  [CI_TlogUsage_CollectTime] CLUSTERED ([CollectTime])
+            );
+            CREATE TABLE TempDBUsage (
+                [CollectTime] [datetime] NOT NULL,
+                [usr_obj_kb] INT NULL,
+                [internal_obj_kb] INT NULL,
+                [version_store_kb] INT NULL,
+                [freespace_kb] INT NULL,
+                [mixedextent_kb] INT NULL,
+                INDEX  [CI_TempDBUsage_CollectTime] CLUSTERED ([CollectTime] )
+            );        "
+        Invoke-DbaQuery -SqlInstance $Server -Database $dbaDatabase -Query $tSQL  | Out-Null
+
+        $job = New-DbaAgentJob -SqlInstance $Server -Job '_DBA - Instance Monitoring' -Category "Monitoring" -OwnerLogin sa -Force
+
+        New-DbaAgentSchedule -SqlInstance $Server -Schedule $job.name -Job $job.name `
+                            -FrequencyType Daily -FrequencyInterval Everyday `
+                            -FrequencySubdayType Minutes -FrequencySubDayinterval $MonitoringInterval `
+                            -StartTime "000100" -EndTime "235959" -Force | Out-Null
+
+        New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "_DBA - TempDBUsage" -Force `
+                            -Database master -StepId 1 `
+                            -Subsystem "TransactSql" `
+                            -Command "
+                INSERT INTO $dbaDatabase.dbo.TempDBUsage
+                SELECT  getdate() as CollectTime,
+                        SUM (user_object_reserved_page_count)*8 as usr_obj_kb,
+                        SUM (internal_object_reserved_page_count)*8 as internal_obj_kb,
+                        SUM (version_store_reserved_page_count)*8 as version_store_kb,
+                        SUM (unallocated_extent_page_count)*8 as freespace_kb,
+                        SUM (mixed_extent_page_count)*8 as mixedextent_kb
+                FROM tempdb.sys.dm_db_file_space_usage;
+
+                DELETE FROM $dbaDatabase.dbo.TempDBUsage 
+                WHERE CollectTime < DATEADD(DAY,-$MonitoringCleanupTime,getdate());
+                            " `
+                            -OnSuccessAction GoToNextStep `
+                            -OnFailAction GoToNextStep | Out-Null
+
+        New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "_DBA - Log TLog Reuse Wait" -Force `
+                            -Database master -StepId 2 `
+                            -Subsystem "TransactSql" `
+                            -Command "
+                INSERT INTO $dbaDatabase.dbo.TlogUsage
+                SELECT  getdate() as CollectTime,@@servername AS Instance,db.[name] AS [Database Name], 
+                        db.recovery_model_desc AS [Recovery Model], db.log_reuse_wait_desc AS [LogReuseWaitDescription], 
+                        CONVERT(DECIMAL(18,2), ls.cntr_value/1024.0) AS [Log Size (MB)], CONVERT(DECIMAL(18,2), 
+                        lu.cntr_value/1024.0) AS [Log Used (MB)],
+                        CAST(CAST(lu.cntr_value AS FLOAT) / CAST(ls.cntr_value AS FLOAT)AS DECIMAL(18,2)) * 100 AS [LogUsed%]
+                FROM sys.databases AS db WITH (NOLOCK)
+                INNER JOIN sys.dm_os_performance_counters AS lu WITH (NOLOCK) ON db.name = lu.instance_name
+                INNER JOIN sys.dm_os_performance_counters AS ls WITH (NOLOCK) ON db.name = ls.instance_name
+                WHERE lu.counter_name LIKE N'Log File(s) Used Size (KB)%' 
+                AND ls.counter_name LIKE N'Log File(s) Size (KB)%'
+                AND ls.cntr_value > 0 
+                AND db.database_id > 4;
+
+                DELETE FROM $dbaDatabase.dbo.TlogUsage 
+                WHERE CollectTime < DATEADD(DAY,-$MonitoringCleanupTime,getdate());
+                            " `
+                            -OnSuccessAction QuitWithSuccess `
+                            -OnFailAction QuitWithFailure | Out-Null
+
+    }
+#endregion
+
 #region Final checks
 
+
+    if ($Server.ConnectionContext -match "User ID") {
+        $Server = Connect-DbaInstance -SqlInstance $InstanceName -SqlCredential $cred
+    } else {
+        $Server = Connect-DbaInstance -SqlInstance $InstanceName
+    }
+  
+    Log "Checking SQL Server nertwork latency"  
     Test-DbaNetworkLatency -SqlInstance $server -Count 10 -Query "select @@servername,@@version" | Format-List 
+
 
     $MaintenanceJobs = Get-DbaAgentJob -SqlInstance $server -Category "Database Maintenance"
     $AgentSchedules = Get-DbaAgentSchedule -SqlInstance $server
+
+    Log "Display maintenance jobs scheduling"
+    Log "'_DBA' Agent jobs call Ola Hallengren maintenance jobs in a relative smart order"
 
     $JoinedData = @()
     foreach ($MaintenanceJob in $MaintenanceJobs) {
@@ -596,14 +783,96 @@ New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseBacku
     }
     $JoinedData | Select-object JobName,NextRunDate,Description | Format-Table -AutoSize
 
-    "ConnectionString : " + $($Server | New-DbaConnectionString)
+    if ($Server.HostPlatform -eq "Windows") {
 
+        Log "Checking Kerberos configuration"
+        $tSQL = "select @@SERVERNAME AS ServerName,client_net_address,client_tcp_port,local_net_address,local_tcp_port
+                    ,net_transport,auth_scheme,es.nt_domain,es.nt_user_name
+                from sys.dm_exec_connections ec
+                inner join sys.dm_exec_sessions es on es.session_id = ec.session_id
+                where ec.session_id = @@spid"
+        $result = Invoke-DbaQuery -SqlInstance $Server -Query $tSQL
+
+        if ($result.auth_scheme -eq "NTLM") {
+
+            Log "NTLM detected, generating SPNs Registration"
+            try {
+                Write-Host
+                $TCPPort = Get-DbaTcpPort -SqlInstance $Server
+                $NetworkName = Resolve-DbaNetworkName -ComputerName $($server.ComputerName) -Turbo
+                $ServiceAccount = $Server.ServiceAccount
+                if ($ServiceAccount -match "NT Service") {
+                    $ServiceAccount = "$($result.nt_domain)`\$($server.ComputerName)`$"
+                }
+                if ($server.ServiceName -eq "MSSQLSERVER") {
+                    Write-Host "SetSPN -s ""MSSQLSvc/$($NetworkName.ComputerName):$($TCPPort.Port)"" ""$ServiceAccount"""
+                    Write-Host "SetSPN -s ""MSSQLSvc/$($NetworkName.DNSHostEntry):$($TCPPort.Port)"" ""$ServiceAccount"""
+                } else {
+                    Write-Host "SetSPN -s ""MSSQLSvc/$($NetworkName.ComputerName):$($TCPPort.Port)"" ""$ServiceAccount"""
+                    Write-Host "SetSPN -s ""MSSQLSvc/$($NetworkName.ComputerName):$($server.ServiceName)"" ""$ServiceAccount"""
+                    Write-Host "SetSPN -s ""MSSQLSvc/$($NetworkName.DNSHostEntry):$($TCPPort.Port)"" ""$ServiceAccount"""
+                    Write-Host "SetSPN -s ""MSSQLSvc/$($NetworkName.DNSHostEntry):$($server.ServiceName)"" ""$ServiceAccount"""
+                }
+            } catch {
+            "An error occurred on $($_.ServerName) "
+            }
+            Write-Host
+        }
+    }
+
+    
+    Log "ConnectionString " 
+    Write-Host 
+    Write-Host  $($Server | New-DbaConnectionString)
+    Write-Host 
+    
 #endregion
+
+
+Log "End"
 
 <#
 
-    Start-DbaAgentJob -SqlInstance $Server -Job "DBA - HouseKeeping"
-    Start-DbaAgentJob -SqlInstance $Server -Job "DBA - USER_DATABASES - FULL"
+    Start-DbaAgentJob -SqlInstance $Server -Job "_DBA - HouseKeeping"
+    Start-DbaAgentJob -SqlInstance $Server -Job "_DBA - USER_DATABASES - FULL"
 
 #>
+
+
+<#
+
+    #region Cleanup
+
+        $Server = Connect-DbaInstance -SqlInstance $InstanceName
+        #$cred = Get-Credential
+        #$Server = Connect-DbaInstance -SqlInstance $InstanceName -SqlCredential $cred
+
+        # Remove Jobs
+        Get-DbaAgentJob -SqlInstance $Server -Category "Database Maintenance" `
+                        | Where-Object {$_.Name -ne "syspolicy_purge_history"} `
+                        | Remove-DbaAgentJob -Confirm:$false | Out-Null
+        Get-DbaAgentJob -SqlInstance $Server -Category "Monitoring" | Remove-DbaAgentJob -Confirm:$false | Out-Null
+
+        # Remove _DBA Database
+        Remove-DbaDatabase -SqlInstance $Server -Database $dbaDatabase -Confirm:$false | Out-Null
+
+        # Remove xEvents
+        Remove-DbaXESession -SqlInstance $Server  -Confirm:$false `
+                            -Session AuditLoginSA,PerformanceIssues,TempDBAutogrowth,UserDBLogAutogrowth | Out-Null
+
+        # Remove Audits
+        Invoke-DbaQuery -SqlInstance $Server -Database master -Query "ALTER SERVER AUDIT SPECIFICATION [AuditSpecification-DDL] WITH (STATE = OFF)" | Out-Null
+        Invoke-DbaQuery -SqlInstance $Server -Database master -Query "ALTER SERVER AUDIT [Audit-DDL] WITH (STATE = OFF)" | Out-Null
+        Invoke-DbaQuery -SqlInstance $Server -Database master -Query "DROP SERVER AUDIT SPECIFICATION [AuditSpecification-DDL]"  | Out-Null
+        Invoke-DbaQuery -SqlInstance $Server -Database master -Query "DROP SERVER AUDIT [Audit-DDL]"  | Out-Null
+
+        Invoke-DbaQuery -SqlInstance $Server -Database "master" -Query "
+            ALTER EVENT SESSION [system_health] ON SERVER
+            ADD EVENT sqlserver.security_error_ring_buffer_recorded;
+        " | Out-Null
+
+    #endregion
+
+#>
+
 
