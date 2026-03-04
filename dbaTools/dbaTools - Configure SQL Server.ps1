@@ -696,7 +696,7 @@ New-DbaAgentJobStep -SqlInstance $Server -Job $job.name -StepName "DatabaseBacku
             );        "
         Invoke-DbaQuery -SqlInstance $Server -Database $dbaDatabase -Query $tSQL  | Out-Null
 
-        $job = New-DbaAgentJob -SqlInstance $Server -Job '_DBA - Instance Monitoring' -Category "Monitoring" -OwnerLogin sa -Force
+        $job = New-DbaAgentJob -SqlInstance $Server -Job "_DBA - Instance Monitoring" -Category "Monitoring" -OwnerLogin sa -Force
 
         New-DbaAgentSchedule -SqlInstance $Server -Schedule $job.name -Job $job.name `
                             -FrequencyType Daily -FrequencyInterval Everyday `
