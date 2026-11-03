@@ -184,9 +184,12 @@ function Write-Log {
 
     $ligne = '{0} [{1}] {2}' -f [DateTime]::Now.ToString('yyyy-MM-dd HH:mm:ss'), $Level, $Message
 
-    # Write-Output plutôt que Write-Host : le flux est ainsi récupéré par l'orchestrateur
-    # (job SQLFleet), alors que Write-Host écrit directement dans la console de l'hôte.
-    if ($Level -eq 'DEBUG') { Write-Verbose $ligne } else { Write-Output $ligne }
+    # IMPORTANT : ne jamais écrire dans le pipeline. Une fonction qui journalise puis retourne
+    # une valeur (Connect-SqlTarget) verrait ses lignes de journal s'ajouter à sa valeur de
+    # retour : $serveur devenait un tableau dont le premier élément était une ligne de log, d'où
+    # « cannot convert 2026-11-03 [INFO] ... to DbaInstanceParameter ». La sortie console est
+    # capturée par le runner via stdout, sans polluer les valeurs de retour.
+    if ($Level -eq 'DEBUG') { Write-Verbose $ligne } else { [Console]::WriteLine($ligne) }
 
     if ($LogPath) {
         $dossier = Split-Path -Path $LogPath -Parent
@@ -213,7 +216,8 @@ function Invoke-ConfigurationStep {
     )
 
     try {
-        & $Action
+        # Sortie dirigée vers l'hôte : l'étape ne doit rien retourner à l'appelant.
+        & $Action | ForEach-Object { if ($null -ne $_) { [Console]::WriteLine($_) } }
     }
     catch {
         Write-Log "Étape « $Name » en échec : $($_.Exception.Message)" -Level ERROR
