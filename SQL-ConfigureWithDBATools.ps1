@@ -239,15 +239,12 @@ function Initialize-DbaToolsModule {
 
     # dbatools 2 bascule sur un chiffrement strict : les instances sans certificat valide
     # refusent alors la connexion. On l'assouplit pour la session, comme le faisait l'original.
-    try {
-        $installe = Get-InstalledModule -Name dbatools -ErrorAction Stop
-        if ($installe.Version.Major -ge 2) {
-            Set-DbatoolsInsecureConnection -SessionOnly | Out-Null
-            Write-Log 'Connexions dbatools assouplies pour la session (module v2+).'
-        }
-    }
-    catch {
-        Write-Log "Impossible de déterminer la version installée de dbatools : $($_.Exception.Message)" -Level WARN
+    # Le test porte sur le module réellement chargé : Get-InstalledModule échoue quand dbatools
+    # a été déployé hors PowerShellGet (copie de dossier, module du runner), ce qui laissait
+    # passer la connexion stricte et faisait échouer le socle sur un certificat auto-signé.
+    if ($module.Version.Major -ge 2) {
+        Set-DbatoolsInsecureConnection -SessionOnly | Out-Null
+        Write-Log "Connexions dbatools assouplies pour la session (module v$($module.Version.Major))."
     }
 }
 
